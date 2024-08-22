@@ -40,6 +40,11 @@ func getWorkflowBadge(ctx *context.Context, workflowFile, branchName, event stri
 	extension := filepath.Ext(workflowFile)
 	workflowName := strings.TrimSuffix(workflowFile, extension)
 
+	label := ctx.Req.URL.Query().Get("label")
+	if label != "" {
+		workflowName = label
+	}
+
 	run, err := actions_model.GetWorkflowLatestRun(ctx, ctx.Repo.Repository.ID, workflowFile, branchName, event)
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
