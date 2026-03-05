@@ -23,6 +23,7 @@
 					<a href="{{.VersionWebLink}}">{{.Package.Name}}</a>
 					<span class="label-list">
 						{{template "package/shared/visibility_badge" dict "Package" .Package "Owner" .Owner}}
+						<span class="ui mini basic label">{{.Version.Version}}</span>
 						<span class="ui label">{{svg .Package.Type.SVGName 16}} {{.Package.Type.Name}}</span>
 					</span>
 				</div>
