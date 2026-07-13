@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically synchronize the Gitea disaster-recovery standby
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=1h
+Persistent=true
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

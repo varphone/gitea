@@ -1,0 +1,24 @@
+[Unit]
+Description=Incrementally synchronize the Gitea disaster-recovery standby
+After=network-online.target gitea-replication.service
+Wants=network-online.target
+Requires=gitea-replication.service
+
+[Service]
+Type=simple
+TimeoutStartSec=24h
+Restart=on-failure
+RestartSec=30s
+User=git
+Group=git
+Environment=USER=git HOME=/home/git GITEA_WORK_DIR=/var/lib/gitea
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/gitea /var/lib/gitea-replication -/home/git/.ssh
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+ExecStart=/usr/local/bin/gitea replicate restore --config /etc/gitea/app.ini

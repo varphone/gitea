@@ -1,0 +1,25 @@
+[Unit]
+Description=Atomically exchange the Gitea disaster-recovery data root
+After=gitea.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=USER=git HOME=/home/git GITEA_WORK_DIR=/var/lib/gitea GITEA_I_AM_BEING_UNSAFE_RUNNING_AS_ROOT=true GITEA_REPLICATION_SWITCH_HELPER=1
+ExecStart=/usr/local/bin/gitea replicate switch-data-root --config /etc/gitea/app.ini
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateNetwork=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib /var/lib/gitea-replication
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+UMask=0077
