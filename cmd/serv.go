@@ -27,6 +27,7 @@ import (
 	"gitea.dev/modules/pprof"
 	"gitea.dev/modules/private"
 	"gitea.dev/modules/process"
+	replication "gitea.dev/modules/replication"
 	repo_module "gitea.dev/modules/repository"
 	"gitea.dev/modules/setting"
 	"gitea.dev/services/lfs"
@@ -252,6 +253,19 @@ func runServ(ctx context.Context, c *cli.Command) error {
 	requestedMode, ok := getAccessMode(verb, lfsVerb)
 	if !ok {
 		return fail(ctx, "Unknown git command", "Unknown git command %s %s", verb, lfsVerb)
+	}
+	if requestedMode >= perm.AccessModeWrite && replication.IsReplicaReadOnly() {
+		return fail(ctx, "The disaster-recovery replica is read-only until it is promoted", "Replication replica rejected SSH write")
+	}
+	if requestedMode >= perm.AccessModeWrite && replication.WriteFencingEnabled() {
+		lease, ok, err := replication.TryAcquireWriteLease()
+		if err != nil {
+			return fail(ctx, "Unable to acquire replication write lease", "Replication fence error: %v", err)
+		}
+		if !ok {
+			return fail(ctx, "Gitea is temporarily read-only while a disaster-recovery snapshot is created", "Replication snapshot fence is active")
+		}
+		defer func() { _ = lease.Release() }()
 	}
 
 	results, extra := private.ServCommand(ctx, keyID, username, reponame, requestedMode, verb, lfsVerb)

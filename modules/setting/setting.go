@@ -176,8 +176,17 @@ func loadRunModeFrom(rootCfg ConfigProvider) {
 	RunUser = rootSec.Key("RUN_USER").MustString(user.CurrentUsername())
 }
 
+func isReplicationSwitchCommand() bool {
+	for index := 0; index+1 < len(os.Args); index++ {
+		if os.Args[index] == "replicate" && os.Args[index+1] == "switch-data-root" {
+			return true
+		}
+	}
+	return false
+}
+
 func mustNotRunAsRoot(rootSec ConfigSection) {
-	if os.Getuid() != 0 {
+	if os.Getuid() != 0 || isReplicationSwitchCommand() {
 		return
 	}
 
@@ -204,6 +213,12 @@ func HasInstallLock(rootCfg ConfigProvider) bool {
 }
 
 func mustCurrentRunUserMatch(rootCfg ConfigProvider) {
+	// The root-owned replication switch helper performs only an atomic directory
+	// exchange and is confined by its dedicated systemd unit. It cannot run the
+	// web service, so it is the sole exception to the normal RUN_USER check.
+	if isReplicationSwitchCommand() || os.Getenv("GITEA_REPLICATION_SWITCH_HELPER") == "1" {
+		return
+	}
 	// Does not check run user when the "InstallLock" is off.
 	if HasInstallLock(rootCfg) {
 		currentUser, match := IsRunUserMatchCurrentUser(RunUser)

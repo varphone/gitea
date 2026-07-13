@@ -1,0 +1,33 @@
+[Unit]
+Description=Gitea disaster-recovery control plane
+After=network.target
+Conflicts=
+
+[Service]
+Type=simple
+User=git
+Group=git
+Environment=USER=git HOME=/home/git GITEA_WORK_DIR=/var/lib/gitea
+RuntimeDirectory=gitea-replication
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/local/bin/gitea replicate serve --config /etc/gitea/app.ini
+ExecStopPost=/usr/local/bin/gitea replicate ensure-primary --config /etc/gitea/app.ini
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/gitea /var/lib/gitea-replication
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
