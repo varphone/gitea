@@ -236,14 +236,18 @@ func (s *controlServer) syncTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *controlServer) syncTask(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, syncJobsPath+"/"), "/")
 	id := parts[0]
 	if !validSnapshotID(id) {
 		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 3 && (parts[1] == "chunks" || parts[1] == "session") {
+		s.syncSnapshot(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	s.mu.RLock()
@@ -256,10 +260,6 @@ func (s *controlServer) syncTask(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 	if job == nil {
 		http.NotFound(w, r)
-		return
-	}
-	if len(parts) == 3 && (parts[1] == "chunks" || parts[1] == "session") {
-		s.syncSnapshot(w, r)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "manifest" {

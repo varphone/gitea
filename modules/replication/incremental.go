@@ -450,20 +450,13 @@ func loadManifestFile(path string) (*SnapshotManifest, error) {
 	if info.Size() > maxManifestSize {
 		return nil, errors.New("incremental manifest exceeds maximum size")
 	}
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	limited := &io.LimitedReader{R: f, N: maxManifestSize + 1}
-	decoder := json.NewDecoder(limited)
 	var m SnapshotManifest
-	if err := decoder.Decode(&m); err != nil {
-		return nil, err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) || limited.N == 0 {
-		return nil, errManifestTrailingData
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("%w: %v", errManifestTrailingData, err)
 	}
 	if err := validateIncrementalManifest(&m); err != nil {
 		return nil, err
