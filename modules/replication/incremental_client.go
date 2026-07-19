@@ -6,7 +6,6 @@ package replication
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"errors"
 	"fmt"
 	"io"
