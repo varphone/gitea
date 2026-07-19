@@ -54,6 +54,12 @@ func TestLoadConfigValidation(t *testing.T) {
 	}
 }
 
+func TestDefaultFinalSessionTimeout(t *testing.T) {
+	if got := defaultConfig().FinalSessionTimeout; got != 5*time.Minute {
+		t.Fatalf("FinalSessionTimeout=%s want=5m", got)
+	}
+}
+
 func TestDefaultFullScanInterval(t *testing.T) {
 	if got := defaultConfig().FullScanInterval; got != 168*time.Hour {
 		t.Fatalf("FullScanInterval=%s want=168h", got)

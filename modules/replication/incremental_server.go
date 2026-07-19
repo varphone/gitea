@@ -19,9 +19,11 @@ import (
 )
 
 type finalSyncSession struct {
-	id       string
-	fence    *WriteFence
-	finished chan struct{}
+	id        string
+	fence     *WriteFence
+	cancel    context.CancelFunc
+	expiresAt time.Time
+	finished  chan struct{}
 }
 
 const baselineManifestName = "baseline.json"
@@ -241,30 +243,40 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.SnapshotTimeout)
-	fence, err := AcquireSnapshotFence(ctx)
+	scanCtx, scanCancel := context.WithTimeout(context.Background(), s.cfg.SnapshotTimeout)
+	fence, err := AcquireSnapshotFence(scanCtx)
 	if err == nil {
-		err = ensureSocketActivationDisabled(ctx, s.cfg.GiteaServiceName)
-	}
-	if err == nil {
-		err = systemctl(ctx, "stop", s.cfg.GiteaServiceName)
+		err = ensureSocketActivationDisabled(scanCtx, s.cfg.GiteaServiceName)
 	}
 	if err != nil {
 		if fence != nil {
 			_ = fence.Release()
 		}
-		cancel()
-		log.Error("Finalize task %s failed before final scan: %v", id, err)
+		scanCancel()
+		log.Error("Finalize task %s failed before stopping primary: %v", id, err)
+		s.failAsyncJob(id, err)
+		return
+	}
+	scanCancel()
+	outageCtx, outageCancel := context.WithTimeout(context.Background(), s.cfg.FinalSessionTimeout)
+	stopAttempted := true
+	if err = systemctl(outageCtx, "stop", s.cfg.GiteaServiceName); err != nil {
+		if stopAttempted {
+			s.recoverPrimary()
+		}
+		_ = fence.Release()
+		outageCancel()
+		log.Error("Finalize task %s failed while stopping primary: %v", id, err)
 		s.failAsyncJob(id, err)
 		return
 	}
 
-	manifest, err := scanIncrementalTreeWithBase(ctx, s.root(), base)
+	manifest, err := scanIncrementalTreeWithBase(outageCtx, s.root(), base)
 	if err != nil {
 		s.recoverPrimary()
 		_ = fence.Release()
-		cancel()
-		log.Error("Finalize task %s final scan failed: %v", id, err)
+		outageCancel()
+		log.Error("Finalize task %s final scan failed within primary outage budget: %v", id, err)
 		s.failAsyncJob(id, err)
 		return
 	}
@@ -275,7 +287,7 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 	if err := signIncrementalManifest(manifest, s.cfg.ControlToken); err != nil {
 		s.recoverPrimary()
 		_ = fence.Release()
-		cancel()
+		outageCancel()
 		log.Error("Finalize task %s signing failed: %v", id, err)
 		s.failAsyncJob(id, err)
 		return
@@ -283,14 +295,14 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 	if err := writeManifest(s.cfg.SnapshotDir, manifest); err != nil {
 		s.recoverPrimary()
 		_ = fence.Release()
-		cancel()
+		outageCancel()
 		log.Error("Finalize task %s persist failed: %v", id, err)
 		s.failAsyncJob(id, err)
 		return
 	}
 	s.setTaskManifest(manifest)
-	session := &finalSyncSession{id: manifest.ID, fence: fence, finished: make(chan struct{})}
-	cancel()
+	deadline, _ := outageCtx.Deadline()
+	session := &finalSyncSession{id: manifest.ID, fence: fence, cancel: outageCancel, expiresAt: deadline, finished: make(chan struct{})}
 	s.mu.Lock()
 	s.session = session
 	job := s.jobs[manifest.ID]
@@ -332,9 +344,15 @@ func (s *controlServer) completeAsyncJob(id string, snapshot Snapshot) {
 }
 
 func (s *controlServer) expireSession(session *finalSyncSession) {
-	timeout := s.cfg.FinalSessionTimeout
-	if timeout <= 0 {
-		timeout = defaultConfig().FinalSessionTimeout
+	timeout := time.Until(session.expiresAt)
+	if session.expiresAt.IsZero() {
+		timeout = s.cfg.FinalSessionTimeout
+		if timeout <= 0 {
+			timeout = defaultConfig().FinalSessionTimeout
+		}
+	}
+	if timeout < 0 {
+		timeout = 0
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -391,6 +409,9 @@ func (s *controlServer) finishSession(id string, success bool) error {
 				s.setTaskManifest(manifest)
 			}
 		}
+	}
+	if session.cancel != nil {
+		session.cancel()
 	}
 	close(session.finished)
 	s.mu.Lock()

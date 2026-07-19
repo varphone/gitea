@@ -43,7 +43,7 @@ func defaultConfig() *config {
 	return &config{
 		Mode: modeReplica, ControlListen: "127.0.0.1:3001",
 		SnapshotDir: "/var/lib/gitea-replication/snapshots", SnapshotRetention: 3, FullScanInterval: 168 * time.Hour,
-		GiteaServiceName: "gitea.service", ServiceTimeout: 2 * time.Minute, SnapshotTimeout: 24 * time.Hour, FinalSessionTimeout: 15 * time.Minute,
+		GiteaServiceName: "gitea.service", ServiceTimeout: 2 * time.Minute, SnapshotTimeout: 24 * time.Hour, FinalSessionTimeout: 5 * time.Minute,
 	}
 }
 
