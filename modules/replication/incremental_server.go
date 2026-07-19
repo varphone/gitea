@@ -32,6 +32,25 @@ func baselineManifestPath(dir string) string {
 	return filepath.Join(dir, baselineManifestName)
 }
 
+func (s *controlServer) fullScanDue(manifest *SnapshotManifest, now time.Time) bool {
+	return manifest.FullScanAt.IsZero() ||
+		(s.cfg.FullScanInterval > 0 && !now.Before(manifest.FullScanAt.Add(s.cfg.FullScanInterval)))
+}
+
+func (s *controlServer) reusablePreflightLocked(now time.Time) *SnapshotManifest {
+	var latest *SnapshotManifest
+	for _, manifest := range s.taskManifests {
+		if manifest.State != "preflight" || s.fullScanDue(manifest, now) {
+			continue
+		}
+		if latest == nil || manifest.CreatedAt.After(latest.CreatedAt) {
+			manifestCopy := *manifest
+			latest = &manifestCopy
+		}
+	}
+	return latest
+}
+
 func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
 	paths := []string{baselineManifestPath(s.cfg.SnapshotDir)}
 	history, _ := filepath.Glob(filepath.Join(s.cfg.SnapshotDir, "*.json"))
@@ -138,6 +157,12 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Info("Resuming preflight checkpoint %s", resumeID)
+		writeJSON(w, manifest)
+		return
+	}
+	if manifest := s.reusablePreflightLocked(time.Now().UTC()); manifest != nil {
+		s.mu.Unlock()
+		log.Info("Reuse completed preflight checkpoint %s", manifest.ID)
 		writeJSON(w, manifest)
 		return
 	}

@@ -83,6 +83,39 @@ func TestPreflightResumesVerifiedCheckpoint(t *testing.T) {
 	}
 }
 
+func TestPreflightReusesCompletedCheckpoint(t *testing.T) {
+	oldRoot, oldVersion := setting.AppWorkPath, setting.AppVer
+	defer func() { setting.AppWorkPath, setting.AppVer = oldRoot, oldVersion }()
+	root := t.TempDir()
+	setting.AppWorkPath, setting.AppVer = root, "test"
+	if err := os.WriteFile(filepath.Join(root, "data"), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	token := "01234567890123456789012345678901"
+	manifest, err := scanIncrementalTree(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ID, manifest.State, manifest.CreatedAt = "20260101T000000.000000000Z", "preflight", time.Now().UTC()
+	manifest.InstanceFingerprint = instanceFingerprint(token)
+	if err := signIncrementalManifest(manifest, token); err != nil {
+		t.Fatal(err)
+	}
+	server := &controlServer{
+		cfg:           &config{Mode: modePrimary, ControlToken: token, SnapshotDir: t.TempDir(), FullScanInterval: time.Hour},
+		jobs:          map[string]*Snapshot{manifest.ID: &manifest.Snapshot},
+		taskManifests: map[string]*SnapshotManifest{manifest.ID: manifest},
+	}
+	response := httptest.NewRecorder()
+	server.preflight(response, httptest.NewRequest(http.MethodPost, syncJobsPath, nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), manifest.ID) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if server.busy || len(server.jobs) != 1 {
+		t.Fatalf("busy=%t jobs=%d", server.busy, len(server.jobs))
+	}
+}
+
 func TestControlAuthenticationAndRouting(t *testing.T) {
 	id := "20260101T000000.000000000Z"
 	server := &controlServer{

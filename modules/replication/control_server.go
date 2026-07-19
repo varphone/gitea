@@ -86,6 +86,13 @@ func ServeControl(ctx context.Context) error {
 	for id, job := range jobs {
 		switch job.State {
 		case "ready", "preflight":
+			manifest, err := loadTrustedManifest(manifestPath(cfg.SnapshotDir, id), cfg.ControlToken, job.State)
+			if err != nil {
+				log.Warn("Discard unavailable persisted replication job %s: %v", id, err)
+				delete(jobs, id)
+				continue
+			}
+			s.taskManifests[id] = manifest
 			jobs[id] = job
 		case "transferring":
 			// A control-plane restart releases the in-memory session and its write
