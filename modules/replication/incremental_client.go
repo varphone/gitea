@@ -833,6 +833,7 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 	if err := writeManifestAt(filepath.Join(cfg.SnapshotDir, "current.json"), final); err != nil {
 		return err
 	}
+	pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention)
 	if err := os.RemoveAll(cacheDir); err != nil {
 		log.Warn("Remove incremental cache: %v", err)
 	}
@@ -867,6 +868,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 	if err := os.MkdirAll(cfg.SnapshotDir, 0o700); err != nil {
 		return err
 	}
+	pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention)
 	stage := installStagePath(cfg)
 	currentPath := filepath.Join(cfg.SnapshotDir, "current.json")
 	previous := previousManifest(currentPath, cfg.ControlToken)
@@ -922,6 +924,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 		if err := persistStandbyManifest(cfg.SnapshotDir, preflight); err != nil {
 			return err
 		}
+		pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention)
 		log.Info("Received preflight manifest %s with %d files and %s of content", preflight.ID, preflight.FileCount, strconv.FormatInt(preflight.Size, 10))
 		if err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, preflight, previous, cacheDir, true); err != nil {
 			return err
@@ -938,6 +941,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 		if err := persistStandbyManifest(cfg.SnapshotDir, final); err != nil {
 			return err
 		}
+		pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention)
 		log.Info("Received final sync manifest %s with %d files and %s of content", final.ID, final.FileCount, strconv.FormatInt(final.Size, 10))
 		return completeFinalSync(ctx, cfg, base, client, final, previous, cacheDir, stage)
 	}

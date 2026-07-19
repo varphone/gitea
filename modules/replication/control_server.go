@@ -116,6 +116,7 @@ func ServeControl(ctx context.Context) error {
 			delete(jobs, id)
 		}
 	}
+	s.prune()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/replication/health", s.auth(s.health))
 	mux.HandleFunc(syncJobsPath, s.auth(s.syncTasks))
@@ -307,17 +308,38 @@ func (s *controlServer) setTaskManifest(manifest *SnapshotManifest) {
 }
 
 func pruneManifestFiles(dir string, retention int) {
-	candidates, _ := filepath.Glob(filepath.Join(dir, "*.json"))
-	manifests := candidates[:0]
-	for _, path := range candidates {
-		if validSnapshotID(strings.TrimSuffix(filepath.Base(path), ".json")) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	var manifests []string
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		path := filepath.Join(dir, name)
+		if strings.HasSuffix(name, ".json.tmp") || (strings.HasPrefix(name, ".") && strings.Contains(name, ".tmp-")) {
+			if os.Remove(path) == nil {
+				removed++
+			}
+			continue
+		}
+		if strings.HasSuffix(name, ".json") && validSnapshotID(strings.TrimSuffix(name, ".json")) {
 			manifests = append(manifests, path)
 		}
 	}
 	sort.Strings(manifests)
 	for len(manifests) > retention {
-		_ = os.Remove(manifests[0])
+		if os.Remove(manifests[0]) == nil {
+			removed++
+		}
 		manifests = manifests[1:]
+	}
+	if removed > 0 {
+		_ = syncDirectory(dir)
+		log.Info("Pruned %d replication manifest files; retained %d snapshot manifests", removed, len(manifests))
 	}
 }
 

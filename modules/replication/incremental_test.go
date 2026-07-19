@@ -349,6 +349,8 @@ func TestPruneManifestHistoryPreservesCurrentBaseline(t *testing.T) {
 	for _, id := range ids {
 		requireWriteFile(t, manifestPath(dir, id), id)
 	}
+	requireWriteFile(t, filepath.Join(dir, ids[0]+".json.tmp"), "interrupted")
+	requireWriteFile(t, filepath.Join(dir, ".current.json.tmp-interrupted"), "interrupted")
 	pruneManifestFiles(dir, 2)
 	if _, err := os.Stat(filepath.Join(dir, "current.json")); err != nil {
 		t.Fatal(err)
@@ -359,6 +361,11 @@ func TestPruneManifestHistoryPreservesCurrentBaseline(t *testing.T) {
 	for _, id := range ids[1:] {
 		if _, err := os.Stat(manifestPath(dir, id)); err != nil {
 			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{filepath.Join(dir, ids[0]+".json.tmp"), filepath.Join(dir, ".current.json.tmp-interrupted")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("interrupted manifest temporary file was not pruned: %s: %v", path, err)
 		}
 	}
 }
