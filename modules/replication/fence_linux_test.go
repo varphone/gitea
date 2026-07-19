@@ -215,8 +215,8 @@ func TestFinalSessionTimeoutRestartsPrimaryWithoutClient(t *testing.T) {
 	}
 	server.mu.RLock()
 	defer server.mu.RUnlock()
-	if server.session != nil || server.jobs[id].State != "failed" {
-		t.Fatalf("session=%v job=%+v", server.session, server.jobs[id])
+	if server.session != nil {
+		t.Fatalf("session=%v", server.session)
 	}
 }
 

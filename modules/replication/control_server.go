@@ -83,6 +83,7 @@ func ServeControl(ctx context.Context) error {
 	}
 	s := &controlServer{cfg: cfg, jobs: jobs, taskManifests: map[string]*SnapshotManifest{}}
 	removeLegacyArchives(cfg.SnapshotDir)
+	primaryRecoveryRequired := false
 	for id, job := range jobs {
 		switch job.State {
 		case "ready", "preflight":
@@ -95,6 +96,7 @@ func ServeControl(ctx context.Context) error {
 			s.taskManifests[id] = manifest
 			jobs[id] = job
 		case "transferring":
+			primaryRecoveryRequired = true
 			// A control-plane restart releases the in-memory session and its write
 			// fence. Never resume such a manifest: the primary may already accept
 			// writes again, so its chunk locations are no longer a stable snapshot.
@@ -124,6 +126,10 @@ func ServeControl(ctx context.Context) error {
 		}
 	}
 	s.prune()
+	if primaryRecoveryRequired {
+		log.Warn("Recovering primary Gitea after interrupted final replication session")
+		s.recoverPrimary()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/replication/health", s.auth(s.health))
 	mux.HandleFunc(syncJobsPath, s.auth(s.syncTasks))

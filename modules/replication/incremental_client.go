@@ -190,13 +190,13 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 	request := syncJobRequest{}
 	if strings.Contains(endpoint, "preflight") {
 		request.Kind = "preflight"
-		if index := strings.Index(endpoint, "resume="); index >= 0 {
-			request.ResumeJobID = endpoint[index+len("resume="):]
+		if _, value, ok := strings.Cut(endpoint, "resume="); ok {
+			request.ResumeJobID = value
 		}
 	} else {
 		request.Kind = "final"
-		if index := strings.Index(endpoint, "base="); index >= 0 {
-			request.BaseJobID = endpoint[index+len("base="):]
+		if _, value, ok := strings.Cut(endpoint, "base="); ok {
+			request.BaseJobID = value
 		}
 	}
 	payload, err := json.Marshal(request)
@@ -273,7 +273,6 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 		_ = resp.Body.Close()
 		return &manifest, nil
 	}
-	return nil, errors.New("manifest request retries exhausted")
 }
 
 func requestSnapshotStatus(ctx context.Context, client *http.Client, base, token, id string) (*Snapshot, error) {
@@ -732,20 +731,6 @@ func resumablePreflightManifest(snapshotDir, token string) *SnapshotManifest {
 		latest = manifest
 	}
 	return latest
-}
-
-func removePreflightCheckpoints(snapshotDir, token string) {
-	paths, err := filepath.Glob(filepath.Join(snapshotDir, "*.json"))
-	if err != nil {
-		return
-	}
-	for _, path := range paths {
-		if _, err := loadTrustedManifest(path, token, "preflight"); err == nil {
-			if err := os.Remove(path); err != nil {
-				log.Warn("Remove completed preflight checkpoint %s: %v", path, err)
-			}
-		}
-	}
 }
 
 func resumableFinalManifest(snapshotDir, token string) *SnapshotManifest {

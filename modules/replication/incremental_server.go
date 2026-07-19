@@ -37,6 +37,13 @@ func (s *controlServer) fullScanDue(manifest *SnapshotManifest, now time.Time) b
 		(s.cfg.FullScanInterval > 0 && !now.Before(manifest.FullScanAt.Add(s.cfg.FullScanInterval)))
 }
 
+func (s *controlServer) finalSessionTimeout() time.Duration {
+	if s.cfg.FinalSessionTimeout > 0 {
+		return s.cfg.FinalSessionTimeout
+	}
+	return defaultConfig().FinalSessionTimeout
+}
+
 func (s *controlServer) reusablePreflightLocked(now time.Time) *SnapshotManifest {
 	var latest *SnapshotManifest
 	for _, manifest := range s.taskManifests {
@@ -285,7 +292,7 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 		return
 	}
 	scanCancel()
-	outageCtx, outageCancel := context.WithTimeout(context.Background(), s.cfg.FinalSessionTimeout)
+	outageCtx, outageCancel := context.WithTimeout(context.Background(), s.finalSessionTimeout())
 	stopAttempted := true
 	if err = systemctl(outageCtx, "stop", s.cfg.GiteaServiceName); err != nil {
 		if stopAttempted {
@@ -373,10 +380,7 @@ func (s *controlServer) completeAsyncJob(id string, snapshot Snapshot) {
 func (s *controlServer) expireSession(session *finalSyncSession) {
 	timeout := time.Until(session.expiresAt)
 	if session.expiresAt.IsZero() {
-		timeout = s.cfg.FinalSessionTimeout
-		if timeout <= 0 {
-			timeout = defaultConfig().FinalSessionTimeout
-		}
+		timeout = s.finalSessionTimeout()
 	}
 	if timeout < 0 {
 		timeout = 0
