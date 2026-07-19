@@ -409,13 +409,59 @@ func finishRemoteSession(ctx context.Context, client *http.Client, base, token, 
 
 func previousManifest(path, token string) *SnapshotManifest {
 	manifest, err := loadTrustedManifest(path, token, "ready")
-	if err != nil {
+	if err == nil {
+		return manifest
+	}
+	if !errors.Is(err, errManifestTrailingData) {
 		if !os.IsNotExist(err) {
 			log.Warn("Ignoring persisted standby baseline %s: %v", path, err)
 		}
 		return nil
 	}
+	manifest, recoveryErr := recoverTrustedBaseline(path, token)
+	if recoveryErr != nil {
+		log.Warn("Ignoring persisted standby baseline %s: %v", path, recoveryErr)
+		return nil
+	}
+	if err := writeManifestAt(path, manifest); err != nil {
+		log.Warn("Recovered persisted standby baseline %s but could not rewrite it: %v", path, err)
+	} else {
+		log.Warn("Recovered persisted standby baseline %s with trailing data; rewrote canonical manifest", path)
+	}
 	return manifest
+}
+
+// recoverTrustedBaseline accepts only the first JSON value in a local ready
+// checkpoint that loadManifestFile rejected for trailing data. The checkpoint
+// must still pass every normal structural and cryptographic verification, then
+// is atomically rewritten by previousManifest before being reused.
+func recoverTrustedBaseline(path, token string) (*SnapshotManifest, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxManifestSize {
+		return nil, errors.New("incremental manifest exceeds maximum size")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var manifest SnapshotManifest
+	if err := json.NewDecoder(io.LimitReader(file, maxManifestSize)).Decode(&manifest); err != nil {
+		return nil, err
+	}
+	if err := validateIncrementalManifest(&manifest); err != nil {
+		return nil, err
+	}
+	if manifest.State != "ready" {
+		return nil, fmt.Errorf("manifest state is %q, expected %q", manifest.State, "ready")
+	}
+	if err := validateManifestIdentity(&manifest, token); err != nil {
+		return nil, err
+	}
+	return &manifest, nil
 }
 
 func cacheHas(cacheDir, hash string) bool {

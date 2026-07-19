@@ -439,6 +439,39 @@ func TestLoadManifestRejectsTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestPreviousManifestRecoversSignedTrailingBaseline(t *testing.T) {
+	oldRoot, oldVersion := setting.AppWorkPath, setting.AppVer
+	defer func() { setting.AppWorkPath, setting.AppVer = oldRoot, oldVersion }()
+	setting.AppWorkPath, setting.AppVer = t.TempDir(), "test"
+	requireWriteFile(t, filepath.Join(setting.AppWorkPath, "data"), "content")
+	manifest, err := scanIncrementalTree(context.Background(), setting.AppWorkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ID, manifest.State, manifest.CreatedAt = "20260101T000000.000000000Z", "ready", time.Unix(1, 0)
+	manifest.InstanceFingerprint = instanceFingerprint("token")
+	if err := signIncrementalManifest(manifest, "token"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "current.json")
+	if err := writeManifestAt(path, manifest); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, []byte("{}")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if previousManifest(path, "token") == nil {
+		t.Fatal("signed baseline with trailing data was not recovered")
+	}
+	if _, err := loadManifestFile(path); err != nil {
+		t.Fatalf("recovered baseline was not rewritten: %v", err)
+	}
+}
+
 func TestBuildIncrementalStageSupportsReadOnlyDirectories(t *testing.T) {
 	oldRoot, oldVersion := setting.AppWorkPath, setting.AppVer
 	defer func() { setting.AppWorkPath, setting.AppVer = oldRoot, oldVersion }()

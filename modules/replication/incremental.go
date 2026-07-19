@@ -30,6 +30,8 @@ const (
 	maxManifestSize          = 256 << 20
 )
 
+var errManifestTrailingData = errors.New("incremental manifest contains oversized or trailing data")
+
 type ChunkDescriptor struct {
 	Hash   string `json:"hash"`
 	Offset int64  `json:"offset"`
@@ -461,7 +463,7 @@ func loadManifestFile(path string) (*SnapshotManifest, error) {
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) || limited.N == 0 {
-		return nil, errors.New("incremental manifest contains oversized or trailing data")
+		return nil, errManifestTrailingData
 	}
 	if err := validateIncrementalManifest(&m); err != nil {
 		return nil, err
