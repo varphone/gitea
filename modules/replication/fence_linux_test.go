@@ -184,6 +184,42 @@ func TestPrimaryRecoveryRetriesAfterTransientFailure(t *testing.T) {
 	}
 }
 
+func TestFinalSessionTimeoutRestartsPrimaryWithoutClient(t *testing.T) {
+	oldSystemctl, oldReadiness := systemctlRunner, readinessCheck
+	defer func() { systemctlRunner, readinessCheck = oldSystemctl, oldReadiness }()
+	restarted := make(chan struct{})
+	systemctlRunner = func(_ context.Context, action, service string) error {
+		if action == "start" && service == "gitea.service" {
+			close(restarted)
+		}
+		return nil
+	}
+	readinessCheck = func(context.Context, string) error { return nil }
+	const id = "20260101T000000.000000000Z"
+	server := &controlServer{
+		cfg:  &config{GiteaServiceName: "gitea.service", ServiceTimeout: time.Second, FinalSessionTimeout: 10 * time.Millisecond},
+		jobs: map[string]*Snapshot{id: {ID: id, State: "transferring"}},
+	}
+	session := &finalSyncSession{id: id, finished: make(chan struct{})}
+	server.session = session
+	go server.expireSession(session)
+	select {
+	case <-restarted:
+	case <-time.After(time.Second):
+		t.Fatal("primary Gitea was not restarted after final-session timeout")
+	}
+	select {
+	case <-session.finished:
+	case <-time.After(time.Second):
+		t.Fatal("timed-out final session did not finish")
+	}
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+	if server.session != nil || server.jobs[id].State != "failed" {
+		t.Fatalf("session=%v job=%+v", server.session, server.jobs[id])
+	}
+}
+
 func TestFinalScanDetectsSameSizeAndRestoredMtime(t *testing.T) {
 	oldRoot, oldVersion, oldChunker := setting.AppWorkPath, setting.AppVer, chunkFileForManifest
 	defer func() {

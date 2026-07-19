@@ -57,7 +57,8 @@ The standby drives every synchronization:
 Chunk boundaries average 1 MiB, with 256 KiB minimum and 4 MiB maximum.
 Content-defined boundaries allow later chunks to be reused after insertions.
 A final session is automatically aborted and the primary restarted when
-`SNAPSHOT_TIMEOUT` expires or the control service stops.
+`FINAL_SESSION_TIMEOUT` expires or the control service stops. `SNAPSHOT_TIMEOUT`
+bounds manifest scans and does not extend the primary outage.
 
 ## Control API
 
@@ -88,6 +89,7 @@ FULL_SCAN_INTERVAL = 168h
 GITEA_SERVICE_NAME = gitea.service
 SERVICE_TIMEOUT = 2m
 SNAPSHOT_TIMEOUT = 24h
+FINAL_SESSION_TIMEOUT = 15m
 ```
 
 `SNAPSHOT_RETENTION` controls small manifest history only. It no longer
@@ -159,7 +161,7 @@ temporary space equal to their reconstructed size until the atomic switch and
 old-tree cleanup complete.
 
 An interrupted preflight leaves Gitea online. An interrupted final session is
-bounded by `SNAPSHOT_TIMEOUT`; transient transport failures retain the active
+bounded by `FINAL_SESSION_TIMEOUT`; transient transport failures retain the active
 final session and the standby service retries after 30 seconds, resuming it
 from the signed final manifest and verified chunk cache without a new preflight
 scan. If the primary control service itself restarts, its in-memory write fence is lost and the interrupted final session is deliberately rejected; the next run performs a fresh preflight to preserve snapshot consistency. The primary restarts automatically when the session expires or is explicitly aborted.

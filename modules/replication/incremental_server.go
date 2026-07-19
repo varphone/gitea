@@ -21,7 +21,6 @@ import (
 type finalSyncSession struct {
 	id       string
 	fence    *WriteFence
-	cancel   context.CancelFunc
 	finished chan struct{}
 }
 
@@ -290,7 +289,8 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 		return
 	}
 	s.setTaskManifest(manifest)
-	session := &finalSyncSession{id: manifest.ID, fence: fence, cancel: cancel, finished: make(chan struct{})}
+	session := &finalSyncSession{id: manifest.ID, fence: fence, finished: make(chan struct{})}
+	cancel()
 	s.mu.Lock()
 	s.session = session
 	job := s.jobs[manifest.ID]
@@ -302,7 +302,7 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 	s.busy = false
 	s.mu.Unlock()
 	log.Info("Finalize task %s completed with transferring manifest %s", id, manifest.ID)
-	go s.expireSession(ctx, session)
+	go s.expireSession(session)
 }
 
 func (s *controlServer) failAsyncJob(id string, err error) {
@@ -331,9 +331,16 @@ func (s *controlServer) completeAsyncJob(id string, snapshot Snapshot) {
 	s.busy = false
 }
 
-func (s *controlServer) expireSession(ctx context.Context, session *finalSyncSession) {
+func (s *controlServer) expireSession(session *finalSyncSession) {
+	timeout := s.cfg.FinalSessionTimeout
+	if timeout <= 0 {
+		timeout = defaultConfig().FinalSessionTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
-	case <-ctx.Done():
+	case <-timer.C:
+		log.Warn("Final sync session %s received no completion within %s; restarting primary Gitea", session.id, timeout)
 		_ = s.finishSession(session.id, false)
 	case <-session.finished:
 	}
@@ -385,7 +392,6 @@ func (s *controlServer) finishSession(id string, success bool) error {
 			}
 		}
 	}
-	session.cancel()
 	close(session.finished)
 	s.mu.Lock()
 	s.busy = false

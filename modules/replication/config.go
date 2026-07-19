@@ -17,19 +17,20 @@ import (
 
 // config represents the configuration for instance replication.
 type config struct {
-	Enabled           bool          `ini:"ENABLED"`
-	Mode              string        `ini:"MODE"`
-	SourceURL         string        `ini:"SOURCE_URL"`
-	ControlListen     string        `ini:"CONTROL_LISTEN"`
-	ControlSourceURL  string        `ini:"CONTROL_SOURCE_URL"`
-	ControlProxyURL   string        `ini:"CONTROL_PROXY_URL"`
-	ControlToken      string        `ini:"CONTROL_TOKEN"`
-	SnapshotDir       string        `ini:"SNAPSHOT_DIR"`
-	SnapshotRetention int           `ini:"SNAPSHOT_RETENTION"`
-	FullScanInterval  time.Duration `ini:"FULL_SCAN_INTERVAL"`
-	GiteaServiceName  string        `ini:"GITEA_SERVICE_NAME"`
-	ServiceTimeout    time.Duration `ini:"SERVICE_TIMEOUT"`
-	SnapshotTimeout   time.Duration `ini:"SNAPSHOT_TIMEOUT"`
+	Enabled             bool          `ini:"ENABLED"`
+	Mode                string        `ini:"MODE"`
+	SourceURL           string        `ini:"SOURCE_URL"`
+	ControlListen       string        `ini:"CONTROL_LISTEN"`
+	ControlSourceURL    string        `ini:"CONTROL_SOURCE_URL"`
+	ControlProxyURL     string        `ini:"CONTROL_PROXY_URL"`
+	ControlToken        string        `ini:"CONTROL_TOKEN"`
+	SnapshotDir         string        `ini:"SNAPSHOT_DIR"`
+	SnapshotRetention   int           `ini:"SNAPSHOT_RETENTION"`
+	FullScanInterval    time.Duration `ini:"FULL_SCAN_INTERVAL"`
+	GiteaServiceName    string        `ini:"GITEA_SERVICE_NAME"`
+	ServiceTimeout      time.Duration `ini:"SERVICE_TIMEOUT"`
+	SnapshotTimeout     time.Duration `ini:"SNAPSHOT_TIMEOUT"`
+	FinalSessionTimeout time.Duration `ini:"FINAL_SESSION_TIMEOUT"`
 }
 
 const (
@@ -42,7 +43,7 @@ func defaultConfig() *config {
 	return &config{
 		Mode: modeReplica, ControlListen: "127.0.0.1:3001",
 		SnapshotDir: "/var/lib/gitea-replication/snapshots", SnapshotRetention: 3, FullScanInterval: 168 * time.Hour,
-		GiteaServiceName: "gitea.service", ServiceTimeout: 2 * time.Minute, SnapshotTimeout: 24 * time.Hour,
+		GiteaServiceName: "gitea.service", ServiceTimeout: 2 * time.Minute, SnapshotTimeout: 24 * time.Hour, FinalSessionTimeout: 15 * time.Minute,
 	}
 }
 
@@ -118,10 +119,16 @@ func loadConfig() (*config, error) {
 	if cfg.SnapshotRetention < 1 {
 		return nil, errors.New("[replicate] SNAPSHOT_RETENTION must be positive")
 	}
+	if sec.HasKey("FINAL_SESSION_TIMEOUT") {
+		cfg.FinalSessionTimeout, err = time.ParseDuration(strings.TrimSpace(sec.Key("FINAL_SESSION_TIMEOUT").String()))
+		if err != nil {
+			return nil, fmt.Errorf("[replicate] invalid FINAL_SESSION_TIMEOUT: %w", err)
+		}
+	}
 	if cfg.FullScanInterval < 0 {
 		return nil, errors.New("[replicate] FULL_SCAN_INTERVAL must not be negative")
 	}
-	if cfg.ServiceTimeout <= 0 || cfg.SnapshotTimeout <= 0 {
+	if cfg.ServiceTimeout <= 0 || cfg.SnapshotTimeout <= 0 || cfg.FinalSessionTimeout <= 0 {
 		return nil, errors.New("[replicate] timeouts must be positive")
 	}
 	if cfg.GiteaServiceName != "gitea.service" {
