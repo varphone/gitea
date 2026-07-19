@@ -96,7 +96,7 @@ func ServeControl(ctx context.Context) error {
 				// A malformed or unauthenticated interrupted checkpoint must never
 				// prevent the control plane from recovering. It cannot be resumed
 				// safely, so keep the file for diagnosis but hide it from the API.
-				log.Warn("Discard interrupted final sync %s: %v", id, err)
+				log.Warn("Discard interrupted final sync %s; retained untrusted checkpoint %s for diagnosis: %v", id, manifestPath(cfg.SnapshotDir, id), err)
 				delete(jobs, id)
 				continue
 			}

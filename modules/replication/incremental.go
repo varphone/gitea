@@ -279,6 +279,31 @@ func verifyIncrementalSignature(manifest *SnapshotManifest, token string) bool {
 	return hmac.Equal([]byte(manifest.Signature), []byte(hex.EncodeToString(mac.Sum(nil))))
 }
 
+// compatibleGiteaVersion accepts builds from the same Gitea release. The
+// build metadata contains the local commit count and revision, which changes
+// on every local rebuild but does not change the replication wire format.
+func compatibleGiteaVersion(source, standby string) bool {
+	source, _, _ = strings.Cut(strings.TrimSpace(source), "+")
+	standby, _, _ = strings.Cut(strings.TrimSpace(standby), "+")
+	return source != "" && source == standby
+}
+
+func validateManifestIdentity(manifest *SnapshotManifest, token string) error {
+	if !compatibleGiteaVersion(manifest.GiteaVersion, setting.AppVer) {
+		return fmt.Errorf("Gitea release mismatch: source %s standby %s", manifest.GiteaVersion, setting.AppVer)
+	}
+	if filepath.Clean(manifest.AppWorkPath) != filepath.Clean(setting.AppWorkPath) {
+		return fmt.Errorf("APP_WORK_PATH mismatch: source %s standby %s", manifest.AppWorkPath, setting.AppWorkPath)
+	}
+	if !verifyIncrementalSignature(manifest, token) {
+		return errors.New("incremental manifest signature is invalid")
+	}
+	if !hmac.Equal([]byte(manifest.InstanceFingerprint), []byte(instanceFingerprint(token))) {
+		return errors.New("standby instance secrets do not match the primary")
+	}
+	return nil
+}
+
 func validateIncrementalManifest(m *SnapshotManifest) error {
 	if m.FormatVersion != incrementalFormatVersion || !validSnapshotID(m.ID) || m.Size < 0 ||
 		m.CreatedAt.IsZero() || m.RootMode == 0 || m.RootMode > 0o777 || m.FileCount != len(m.Files) {
@@ -456,12 +481,8 @@ func loadTrustedManifestStates(path, token string, states ...string) (*SnapshotM
 	if !slices.Contains(states, manifest.State) {
 		return nil, fmt.Errorf("manifest state is %q, expected one of %q", manifest.State, states)
 	}
-	if manifest.GiteaVersion != setting.AppVer || filepath.Clean(manifest.AppWorkPath) != filepath.Clean(setting.AppWorkPath) {
-		return nil, errors.New("manifest belongs to a different Gitea installation")
-	}
-	if !verifyIncrementalSignature(manifest, token) ||
-		!hmac.Equal([]byte(manifest.InstanceFingerprint), []byte(instanceFingerprint(token))) {
-		return nil, errors.New("manifest authentication failed")
+	if err := validateManifestIdentity(manifest, token); err != nil {
+		return nil, err
 	}
 	return manifest, nil
 }

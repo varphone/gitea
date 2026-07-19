@@ -255,21 +255,9 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 			_ = resp.Body.Close()
 			return nil, fmt.Errorf("%s returned manifest state %q", endpoint, manifest.State)
 		}
-		if manifest.GiteaVersion != setting.AppVer {
+		if err := validateManifestIdentity(&manifest, token); err != nil {
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("Gitea version mismatch: source %s standby %s", manifest.GiteaVersion, setting.AppVer)
-		}
-		if filepath.Clean(manifest.AppWorkPath) != filepath.Clean(setting.AppWorkPath) {
-			_ = resp.Body.Close()
-			return nil, fmt.Errorf("APP_WORK_PATH mismatch: source %s standby %s", manifest.AppWorkPath, setting.AppWorkPath)
-		}
-		if !hmac.Equal([]byte(manifest.InstanceFingerprint), []byte(instanceFingerprint(token))) {
-			_ = resp.Body.Close()
-			return nil, errors.New("standby instance secrets do not match the primary")
-		}
-		if !verifyIncrementalSignature(&manifest, token) {
-			_ = resp.Body.Close()
-			return nil, errors.New("incremental manifest signature is invalid")
+			return nil, err
 		}
 		_ = resp.Body.Close()
 		return &manifest, nil
@@ -327,21 +315,9 @@ func requestManifestByID(ctx context.Context, client *http.Client, base, token, 
 			_ = resp.Body.Close()
 			return nil, fmt.Errorf("snapshot manifest %s returned state %q, expected %q", id, manifest.State, expectedState)
 		}
-		if manifest.GiteaVersion != setting.AppVer {
+		if err := validateManifestIdentity(&manifest, token); err != nil {
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("Gitea version mismatch: source %s standby %s", manifest.GiteaVersion, setting.AppVer)
-		}
-		if filepath.Clean(manifest.AppWorkPath) != filepath.Clean(setting.AppWorkPath) {
-			_ = resp.Body.Close()
-			return nil, fmt.Errorf("APP_WORK_PATH mismatch: source %s standby %s", manifest.AppWorkPath, setting.AppWorkPath)
-		}
-		if !hmac.Equal([]byte(manifest.InstanceFingerprint), []byte(instanceFingerprint(token))) {
-			_ = resp.Body.Close()
-			return nil, errors.New("standby instance secrets do not match the primary")
-		}
-		if !verifyIncrementalSignature(&manifest, token) {
-			_ = resp.Body.Close()
-			return nil, errors.New("incremental manifest signature is invalid")
+			return nil, err
 		}
 		_ = resp.Body.Close()
 		return &manifest, nil
@@ -435,6 +411,9 @@ func finishRemoteSession(ctx context.Context, client *http.Client, base, token, 
 func previousManifest(path, token string) *SnapshotManifest {
 	manifest, err := loadTrustedManifest(path, token, "ready")
 	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Warn("Ignoring persisted standby baseline %s: %v", path, err)
+		}
 		return nil
 	}
 	return manifest

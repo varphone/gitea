@@ -386,6 +386,30 @@ func TestPreviousManifestRequiresValidSignature(t *testing.T) {
 	}
 }
 
+func TestPreviousManifestAcceptsSameReleaseDifferentBuild(t *testing.T) {
+	oldRoot, oldVersion := setting.AppWorkPath, setting.AppVer
+	defer func() { setting.AppWorkPath, setting.AppVer = oldRoot, oldVersion }()
+	setting.AppWorkPath, setting.AppVer = t.TempDir(), "1.26.4+4-gold"
+	requireWriteFile(t, filepath.Join(setting.AppWorkPath, "data"), "content")
+	manifest, err := scanIncrementalTree(context.Background(), setting.AppWorkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ID, manifest.State, manifest.CreatedAt = "20260101T000000.000000000Z", "ready", time.Unix(1, 0)
+	manifest.InstanceFingerprint = instanceFingerprint("token")
+	if err := signIncrementalManifest(manifest, "token"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "current.json")
+	if err := writeManifestAt(path, manifest); err != nil {
+		t.Fatal(err)
+	}
+	setting.AppVer = "1.26.4+7-gnew"
+	if previousManifest(path, "token") == nil {
+		t.Fatal("baseline from the same Gitea release was not trusted")
+	}
+}
+
 func TestLoadManifestRejectsTrailingJSON(t *testing.T) {
 	oldRoot, oldVersion := setting.AppWorkPath, setting.AppVer
 	defer func() { setting.AppWorkPath, setting.AppVer = oldRoot, oldVersion }()
