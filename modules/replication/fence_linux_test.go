@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,8 +72,14 @@ func TestIncrementalHTTPRoundTripAndSecondDelta(t *testing.T) {
 		GiteaServiceName: "gitea.service", ServiceTimeout: 2 * time.Second, SnapshotTimeout: 10 * time.Second,
 	}, jobs: map[string]*Snapshot{}, dataRoot: sourceRoot}
 	mux := http.NewServeMux()
+	var chunkRequests atomic.Int64
 	mux.HandleFunc("/api/v1/replication/sync-jobs", source.auth(source.syncTasks))
-	mux.HandleFunc("/api/v1/replication/sync-jobs/", source.auth(source.syncTask))
+	mux.HandleFunc("/api/v1/replication/sync-jobs/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/chunks/") {
+			chunkRequests.Add(1)
+		}
+		source.auth(source.syncTask)(w, r)
+	})
 	httpServer := httptest.NewServer(mux)
 	defer httpServer.Close()
 	replica := &config{
@@ -85,6 +93,17 @@ func TestIncrementalHTTPRoundTripAndSecondDelta(t *testing.T) {
 	assertFileContent(t, setting.Database.Path, "primary-db-v1")
 	assertFileContent(t, setting.CustomConf, "standby-config")
 	assertFileContent(t, filepath.Join(standbyRoot, "repositories", "owner", "repo.git", "objects", "object"), "git-object")
+
+	if err := os.Remove(filepath.Join(replica.SnapshotDir, "current.json")); err != nil {
+		t.Fatal(err)
+	}
+	chunkRequests.Store(0)
+	if err := restoreIncremental(context.Background(), replica, httpServer.URL, httpServer.Client()); err != nil {
+		t.Fatal(err)
+	}
+	if got := chunkRequests.Load(); got != 0 {
+		t.Fatalf("local standby data was not reused; chunk requests=%d", got)
+	}
 
 	time.Sleep(time.Millisecond)
 	requireWriteFile(t, filepath.Join(sourceRoot, "data", "gitea.db"), "primary-db-v2")

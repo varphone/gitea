@@ -870,6 +870,16 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 	stage := installStagePath(cfg)
 	currentPath := filepath.Join(cfg.SnapshotDir, "current.json")
 	previous := previousManifest(currentPath, cfg.ControlToken)
+	trustedBaseline := previous != nil
+	if previous == nil {
+		local, err := scanIncrementalTree(ctx, filepath.Clean(setting.AppWorkPath))
+		if err != nil {
+			log.Warn("Cannot index existing standby data for chunk reuse: %v", err)
+		} else {
+			previous = local
+			log.Info("No trusted standby baseline; indexed %d local files for verified chunk reuse", local.FileCount)
+		}
+	}
 	cacheDir := filepath.Join(cfg.SnapshotDir, ".chunks")
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return err
@@ -877,10 +887,12 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 	if resumed, err := resumeFinalSync(ctx, cfg, base, client, previous, cacheDir, stage); resumed {
 		return err
 	}
-	if previous == nil {
-		log.Info("Starting standby restore without a trusted local baseline; a full preflight scan is expected")
-	} else {
+	if trustedBaseline {
 		log.Info("Starting standby restore from trusted local baseline %s", previous.ID)
+	} else if previous != nil {
+		log.Info("Starting standby restore without a trusted baseline; local content will be verified and reused")
+	} else {
+		log.Info("Starting standby restore without reusable local data; a full preflight scan is expected")
 	}
 	recoveryPreflight := resumablePreflightManifest(cfg.SnapshotDir, cfg.ControlToken)
 	for finalizeAttempt := 1; finalizeAttempt <= 2; finalizeAttempt++ {
