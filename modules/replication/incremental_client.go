@@ -34,6 +34,8 @@ const (
 	statusBodyPreviewLimit = 4 << 10
 )
 
+var syncBusyRetryDelay = time.Second
+
 type chunkChangedError struct {
 	hash   string
 	status string
@@ -202,7 +204,8 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 		return nil, err
 	}
 	operation := "create sync job " + request.Kind
-	for attempt := 1; attempt <= requestRetryLimit; attempt++ {
+	busyWaits := 0
+	for attempt := 1; ; attempt++ {
 		resp, err := doRetryableJSONRequest(ctx, client, http.MethodPost, base+syncJobsPath, token, operation, payload)
 		if err != nil {
 			return nil, err
@@ -219,10 +222,19 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 		if resp.StatusCode != http.StatusOK {
 			statusErr := responseStatusError(endpoint, resp)
 			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusConflict && request.Kind == "final" && strings.Contains(statusErr.Error(), "sync already in progress") && attempt < requestRetryLimit {
-				if retryErr := waitForRetry(ctx, attempt, operation, statusErr); retryErr != nil {
-					return nil, retryErr
+			if resp.StatusCode == http.StatusConflict && strings.Contains(statusErr.Error(), "sync already in progress") {
+				busyWaits++
+				if busyWaits == 1 || busyWaits%30 == 0 {
+					log.Info("Primary replication is busy; waiting to create %s job (%d waits)", request.Kind, busyWaits)
 				}
+				timer := time.NewTimer(syncBusyRetryDelay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil, ctx.Err()
+				case <-timer.C:
+				}
+				attempt = 0
 				continue
 			}
 			return nil, statusErr

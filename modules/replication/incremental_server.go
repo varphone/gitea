@@ -120,7 +120,8 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	if s.busy || s.session != nil {
 		s.mu.Unlock()
-		log.Warn("Reject preflight request: sync already in progress")
+		w.Header().Set("Retry-After", "1")
+		log.Info("Preflight request deferred: sync already in progress")
 		http.Error(w, "sync already in progress", http.StatusConflict)
 		return
 	}
@@ -201,7 +202,8 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	if s.busy || s.session != nil {
 		s.mu.Unlock()
-		log.Warn("Reject finalize request: sync already in progress")
+		w.Header().Set("Retry-After", "1")
+		log.Info("Finalize request deferred: sync already in progress")
 		http.Error(w, "sync already in progress", http.StatusConflict)
 		return
 	}

@@ -154,6 +154,40 @@ func (r *truncatedManifestReader) Read(p []byte) (int, error) {
 	return copy(p, r.data), io.ErrUnexpectedEOF
 }
 
+func TestRequestManifestWaitsForActiveReplication(t *testing.T) {
+	oldRoot, oldVersion, oldDelay := setting.AppWorkPath, setting.AppVer, syncBusyRetryDelay
+	defer func() { setting.AppWorkPath, setting.AppVer, syncBusyRetryDelay = oldRoot, oldVersion, oldDelay }()
+	setting.AppWorkPath, setting.AppVer = t.TempDir(), "test"
+	requireWriteFile(t, filepath.Join(setting.AppWorkPath, "data"), "content")
+	manifest, err := scanIncrementalTree(context.Background(), setting.AppWorkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ID, manifest.State, manifest.CreatedAt = "20260101T000000.000000000Z", "preflight", time.Unix(1, 0)
+	manifest.InstanceFingerprint = instanceFingerprint("token")
+	if err := signIncrementalManifest(manifest, "token"); err != nil {
+		t.Fatal(err)
+	}
+	syncBusyRetryDelay = time.Millisecond
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			http.Error(w, "sync already in progress", http.StatusConflict)
+			return
+		}
+		writeJSON(w, manifest)
+	}))
+	defer server.Close()
+	got, err := requestManifest(context.Background(), server.Client(), server.URL, "token", "preflight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || got.ID != manifest.ID {
+		t.Fatalf("attempts=%d manifest=%+v", attempts, got)
+	}
+}
+
 func TestDecodeManifestAcceptsCompleteDocumentWithTruncatedTransportTrailer(t *testing.T) {
 	data, err := json.Marshal(SnapshotManifest{Snapshot: Snapshot{ID: "20260101T000000.000000000Z"}})
 	if err != nil {
