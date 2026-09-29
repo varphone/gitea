@@ -178,7 +178,7 @@ func validateAtomicLayout(snapshotDir string) error {
 	if err != nil {
 		return fmt.Errorf("resolve APP_WORK_PATH: %w", err)
 	}
-	if root == string(filepath.Separator) {
+	if filepath.Dir(root) == root {
 		return errors.New("APP_WORK_PATH must not be the filesystem root")
 	}
 	resolvedSnapshotDir, err := resolvedPath(snapshotDir)
@@ -187,6 +187,12 @@ func validateAtomicLayout(snapshotDir string) error {
 	}
 	if isWithin(root, resolvedSnapshotDir) {
 		return fmt.Errorf("SNAPSHOT_DIR %q must be outside APP_WORK_PATH %q", snapshotDir, root)
+	}
+	if filepath.Dir(resolvedSnapshotDir) == resolvedSnapshotDir {
+		return errors.New("SNAPSHOT_DIR must not be the filesystem root")
+	}
+	if isWithin(resolvedSnapshotDir, root) {
+		return fmt.Errorf("SNAPSHOT_DIR %q must not contain APP_WORK_PATH %q", snapshotDir, root)
 	}
 	paths := []string{setting.Database.Path, setting.RepoRootPath, setting.CustomPath, setting.AppDataPath}
 	storages := []*setting.Storage{
@@ -322,7 +328,7 @@ func (s *controlServer) syncTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *controlServer) prune() {
-	pruneManifestFiles(s.cfg.SnapshotDir, s.cfg.SnapshotRetention)
+	pruneManifestFiles(s.cfg.SnapshotDir, s.cfg.SnapshotRetention, s.cfg.ControlToken)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, job := range s.jobs {
@@ -370,7 +376,27 @@ func (s *controlServer) setTaskManifest(manifest *SnapshotManifest) {
 	s.taskChunkIndexes[manifest.ID] = indexManifest(&manifestCopy)
 }
 
-func pruneManifestFiles(dir string, retention int) {
+func isReplicationTemporaryFile(name string) bool {
+	if strings.HasPrefix(name, "..install-stage.checkpoint.tmp-") {
+		return true
+	}
+	for _, base := range []string{"baseline.json", "current.json"} {
+		if strings.HasPrefix(name, "."+base+".tmp-") {
+			return true
+		}
+	}
+	if strings.HasSuffix(name, ".json.tmp") {
+		base := strings.TrimSuffix(strings.TrimPrefix(name, "."), ".json.tmp")
+		return base == "baseline" || base == "current" || validSnapshotID(base)
+	}
+	if baseName, ok := strings.CutPrefix(name, "."); ok {
+		base, _, ok := strings.Cut(baseName, ".json.tmp-")
+		return ok && validSnapshotID(base)
+	}
+	return false
+}
+
+func pruneManifestFiles(dir string, retention int, tokens ...string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -383,13 +409,19 @@ func pruneManifestFiles(dir string, retention int) {
 		}
 		name := entry.Name()
 		path := filepath.Join(dir, name)
-		if strings.HasSuffix(name, ".json.tmp") || (strings.HasPrefix(name, ".") && strings.Contains(name, ".tmp-")) {
+		if isReplicationTemporaryFile(name) {
 			if os.Remove(path) == nil {
 				removed++
 			}
 			continue
 		}
 		if strings.HasSuffix(name, ".json") && validSnapshotID(strings.TrimSuffix(name, ".json")) {
+			if len(tokens) > 0 {
+				manifest, err := loadManifestFile(path)
+				if err != nil || manifest.ID != strings.TrimSuffix(name, ".json") || !verifyIncrementalSignature(manifest, tokens[0]) {
+					continue
+				}
+			}
 			manifests = append(manifests, path)
 		}
 	}
