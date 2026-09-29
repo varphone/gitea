@@ -737,6 +737,51 @@ func fileMatchesManifestChunks(ctx context.Context, path string, entry TreeEntry
 	return sameChunks(chunks, entry.Chunks), nil
 }
 
+func pruneUnexpectedStageEntries(ctx context.Context, stage string, manifest *SnapshotManifest) error {
+	expected := make(map[string]struct{}, len(manifest.Files))
+	for _, entry := range manifest.Files {
+		expected[entry.Path] = struct{}{}
+	}
+	removed := 0
+	err := filepath.Walk(stage, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if path == stage {
+			return os.Chmod(path, 0o700)
+		}
+		rel, err := filepath.Rel(stage, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if _, ok := expected[rel]; !ok {
+			if err := os.RemoveAll(path); err != nil {
+				return fmt.Errorf("remove unexpected staging entry %q: %w", rel, err)
+			}
+			removed++
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if removed > 0 {
+		log.Info("Removed unexpected entries from resumed staging tree: snapshot=%s entries=%d", manifest.ID, removed)
+	}
+	return nil
+}
+
 func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, manifest, previous *SnapshotManifest, fetch func(string) ([]byte, error)) error {
 	stageInfo, err := os.Lstat(stage)
 	if err != nil {
@@ -745,7 +790,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	if !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
 		return errors.New("incremental staging path must be a real directory")
 	}
-	if err := os.Chmod(stage, 0o700); err != nil {
+	if err := pruneUnexpectedStageEntries(ctx, stage, manifest); err != nil {
 		return err
 	}
 	// Keep directories writable while their children are reconstructed;
@@ -941,18 +986,44 @@ type stageCheckpoint struct {
 	ManifestSHA string `json:"manifest_sha"`
 }
 
+const maxStageCheckpointSize = 4 << 10
+
 func stageCheckpointPath(cfg *config) string {
 	return filepath.Join(cfg.SnapshotDir, ".install-stage.checkpoint")
 }
 
+func readStageCheckpoint(path string) (stageCheckpoint, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return stageCheckpoint{}, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxStageCheckpointSize {
+		return stageCheckpoint{}, errors.New("invalid staging checkpoint file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return stageCheckpoint{}, err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return stageCheckpoint{}, err
+	}
+	if !os.SameFile(info, openedInfo) {
+		return stageCheckpoint{}, errors.New("staging checkpoint changed while opening")
+	}
+	var checkpoint stageCheckpoint
+	if err := decodeBoundedJSON(file, maxStageCheckpointSize, &checkpoint); err != nil {
+		return stageCheckpoint{}, err
+	}
+	return checkpoint, nil
+}
+
 func prepareIncrementalStage(cfg *config, final *SnapshotManifest, stage string) (bool, error) {
 	checkpointPath := stageCheckpointPath(cfg)
-	if data, err := os.ReadFile(checkpointPath); err == nil {
-		var checkpoint stageCheckpoint
-		if json.Unmarshal(data, &checkpoint) == nil && checkpoint.SnapshotID == final.ID && checkpoint.ManifestSHA == final.SHA256 {
-			if info, err := os.Lstat(stage); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-				return true, nil
-			}
+	if checkpoint, err := readStageCheckpoint(checkpointPath); err == nil && checkpoint.SnapshotID == final.ID && checkpoint.ManifestSHA == final.SHA256 {
+		if info, err := os.Lstat(stage); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			return true, nil
 		}
 	}
 	if err := os.RemoveAll(stage); err != nil {
