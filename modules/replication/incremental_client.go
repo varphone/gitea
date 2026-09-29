@@ -460,20 +460,13 @@ func previousManifest(path, token string) *SnapshotManifest {
 // must still pass every normal structural and cryptographic verification, then
 // is atomically rewritten by previousManifest before being reused.
 func recoverTrustedBaseline(path, token string) (*SnapshotManifest, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxManifestSize {
-		return nil, errors.New("incremental manifest exceeds maximum size")
-	}
-	file, err := os.Open(path)
+	file, err := openManifestFile(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 	var manifest SnapshotManifest
-	if err := json.NewDecoder(io.LimitReader(file, maxManifestSize)).Decode(&manifest); err != nil {
+	if err := json.NewDecoder(io.LimitReader(file, int64(maxManifestSize)+1)).Decode(&manifest); err != nil {
 		return nil, err
 	}
 	if err := validateIncrementalManifest(&manifest); err != nil {

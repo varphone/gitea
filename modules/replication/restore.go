@@ -74,14 +74,9 @@ func loadManifests(dir, token string) (map[string]*Snapshot, error) {
 	}
 	result := make(map[string]*Snapshot, len(paths))
 	for _, path := range paths {
-		info, statErr := os.Stat(path)
-		if statErr != nil || info.Size() > maxManifestSize {
-			log.Warn("Skip oversized or unreadable snapshot manifest %s", path)
-			continue
-		}
-		data, err := os.ReadFile(path)
+		data, err := readManifestData(path)
 		if err != nil {
-			log.Warn("Skip unreadable snapshot manifest %s: %v", path, err)
+			log.Warn("Skip oversized or unreadable snapshot manifest %s: %v", path, err)
 			continue
 		}
 		var manifest SnapshotManifest

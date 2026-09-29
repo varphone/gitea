@@ -549,15 +549,41 @@ func storeChunk(cacheDir, hash string, data []byte) error {
 	return syncDirectory(dir)
 }
 
-func loadManifestFile(path string) (*SnapshotManifest, error) {
-	info, err := os.Stat(path)
+func openManifestFile(path string) (*os.File, error) {
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	if info.Size() > maxManifestSize {
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if info.Size() > int64(maxManifestSize) {
+		_ = file.Close()
 		return nil, errors.New("incremental manifest exceeds maximum size")
 	}
-	data, err := os.ReadFile(path)
+	return file, nil
+}
+
+func readManifestData(path string) ([]byte, error) {
+	file, err := openManifestFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, int64(maxManifestSize)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxManifestSize {
+		return nil, errors.New("incremental manifest exceeds maximum size")
+	}
+	return data, nil
+}
+
+func loadManifestFile(path string) (*SnapshotManifest, error) {
+	data, err := readManifestData(path)
 	if err != nil {
 		return nil, err
 	}
