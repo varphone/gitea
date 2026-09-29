@@ -484,34 +484,9 @@ func writeJSON(w http.ResponseWriter, value any) {
 
 func writeJSONMaybeGzip(w http.ResponseWriter, r *http.Request, payload any) {
 	w.Header().Add("Vary", "Accept-Encoding")
-	for _, header := range r.Header.Values("Accept-Encoding") {
-		for item := range strings.SplitSeq(header, ",") {
-			encoding, parameters, _ := strings.Cut(strings.TrimSpace(item), ";")
-			if !strings.EqualFold(encoding, "gzip") {
-				continue
-			}
-			quality := 1.0
-			for parameter := range strings.SplitSeq(parameters, ";") {
-				name, parameterValue, ok := strings.Cut(strings.TrimSpace(parameter), "=")
-				if !ok || !strings.EqualFold(name, "q") {
-					continue
-				}
-				parsed, err := strconv.ParseFloat(parameterValue, 64)
-				if err != nil || !(parsed >= 0 && parsed <= 1) {
-					writeJSON(w, payload)
-					return
-				}
-				quality = parsed
-			}
-			if quality == 0 {
-				writeJSON(w, payload)
-				return
-			}
-			writer, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
-			if err != nil {
-				writeJSON(w, payload)
-				return
-			}
+	if requestAcceptsGzip(r) {
+		writer, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
+		if err == nil {
 			w.Header().Set("Content-Encoding", "gzip")
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(writer).Encode(payload)
