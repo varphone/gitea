@@ -29,9 +29,22 @@ type syncJobRequest struct {
 	Kind        string `json:"kind"`
 	BaseJobID   string `json:"base_job_id,omitempty"`
 	ResumeJobID string `json:"resume_job_id,omitempty"`
+	RequestID   string `json:"request_id,omitempty"`
 }
 
 const syncJobsPath = "/api/v1/replication/sync-jobs"
+
+func validReplicationRequestID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	for _, char := range id {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 type Snapshot struct {
 	ID        string    `json:"id"`
@@ -41,6 +54,8 @@ type Snapshot struct {
 	SHA256    string    `json:"sha256,omitempty"`
 	Error     string    `json:"error,omitempty"`
 	RootMode  uint32    `json:"root_mode"`
+	RequestID string    `json:"-"`
+	BaseJobID string    `json:"-"`
 }
 
 const snapshotStateCreating = "creating"
@@ -223,12 +238,17 @@ func (s *controlServer) syncTasks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid sync job request", http.StatusBadRequest)
 			return
 		}
+		if request.RequestID != "" && !validReplicationRequestID(request.RequestID) {
+			http.Error(w, "invalid sync job request ID", http.StatusBadRequest)
+			return
+		}
 		switch request.Kind {
 		case "preflight":
 			r.URL.RawQuery = "resume=" + request.ResumeJobID
 			s.preflight(w, r)
 		case "final":
 			r.URL.RawQuery = "base=" + request.BaseJobID
+			r.Header.Set("Idempotency-Key", request.RequestID)
 			s.finalize(w, r)
 		default:
 			http.Error(w, "sync job kind must be preflight or final", http.StatusBadRequest)

@@ -6,6 +6,8 @@ package replication
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -211,6 +213,11 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 		if _, value, ok := strings.Cut(endpoint, "base="); ok {
 			request.BaseJobID = value
 		}
+		var requestID [16]byte
+		if _, err := rand.Read(requestID[:]); err != nil {
+			return nil, fmt.Errorf("generate sync job request ID: %w", err)
+		}
+		request.RequestID = hex.EncodeToString(requestID[:])
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
@@ -222,15 +229,30 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 	for attempt := 1; ; attempt++ {
 		resp, err := doRetryableJSONRequest(ctx, client, http.MethodPost, base+syncJobsPath, token, operation, payload)
 		if err != nil {
+			if attempt < requestRetryLimit && shouldRetryRequestError(err) {
+				if retryErr := waitForRetry(ctx, attempt, operation, err); retryErr != nil {
+					return nil, retryErr
+				}
+				continue
+			}
 			return nil, err
 		}
 		if resp.StatusCode == http.StatusAccepted {
 			var job Snapshot
 			if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&job); err != nil {
 				_ = resp.Body.Close()
+				if attempt < requestRetryLimit && shouldRetryRequestError(err) {
+					if retryErr := waitForRetry(ctx, attempt, operation, err); retryErr != nil {
+						return nil, retryErr
+					}
+					continue
+				}
 				return nil, err
 			}
 			_ = resp.Body.Close()
+			if !validSnapshotID(job.ID) {
+				return nil, errors.New("sync job response contains an invalid snapshot ID")
+			}
 			return pollManifestTask(ctx, client, base, token, job.ID, endpoint)
 		}
 		if resp.StatusCode != http.StatusOK {

@@ -290,7 +290,38 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	baseID := r.URL.Query().Get("base")
+	if !validSnapshotID(baseID) {
+		log.Warn("Reject finalize request: invalid preflight base %q", baseID)
+		http.Error(w, "a valid preflight base is required", http.StatusBadRequest)
+		return
+	}
+	requestID := r.Header.Get("Idempotency-Key")
+	if requestID != "" && !validReplicationRequestID(requestID) {
+		http.Error(w, "invalid sync job request ID", http.StatusBadRequest)
+		return
+	}
 	s.mu.Lock()
+	if requestID != "" {
+		for _, existing := range s.jobs {
+			if existing.RequestID != requestID {
+				continue
+			}
+			if existing.BaseJobID != baseID {
+				s.mu.Unlock()
+				http.Error(w, "sync job request ID was already used for another preflight base", http.StatusConflict)
+				return
+			}
+			job := *existing
+			s.mu.Unlock()
+			if job.State == snapshotStateCreating || job.State == "transferring" {
+				writeJSONStatus(w, http.StatusAccepted, job)
+				return
+			}
+			http.Error(w, fmt.Sprintf("sync job request has already ended in state %s: %s", job.State, job.Error), http.StatusConflict)
+			return
+		}
+	}
 	if s.busy || s.session != nil || s.primaryRecoveryPending {
 		recoveryPending := s.primaryRecoveryPending
 		s.mu.Unlock()
@@ -304,13 +335,6 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	baseID := r.URL.Query().Get("base")
-	if !validSnapshotID(baseID) {
-		s.mu.Unlock()
-		log.Warn("Reject finalize request: invalid preflight base %q", baseID)
-		http.Error(w, "a valid preflight base is required", http.StatusBadRequest)
-		return
-	}
 	if manifest := s.taskManifests[baseID]; manifest != nil && manifest.State == "preflight" {
 		// A just-completed preflight task is authoritative in memory and avoids
 		// a second disk parse before finalize begins.
@@ -321,16 +345,16 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := time.Now().UTC().Format(snapshotIDLayout)
-	job := &Snapshot{ID: id, State: snapshotStateCreating, CreatedAt: time.Now().UTC()}
+	job := &Snapshot{ID: id, State: snapshotStateCreating, CreatedAt: time.Now().UTC(), RequestID: requestID, BaseJobID: baseID}
 	s.jobs[id] = job
 	s.busy = true
 	s.mu.Unlock()
 	log.Info("Accepted finalize task %s for preflight base %s", id, baseID)
-	go s.runFinalizeTask(id, baseID)
+	go s.runFinalizeTask(id, baseID, requestID)
 	writeJSONStatus(w, http.StatusAccepted, job)
 }
 
-func (s *controlServer) runFinalizeTask(id, baseID string) {
+func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 	taskStarted := time.Now()
 	base := s.getTaskManifest(baseID)
 	if base == nil || base.State != "preflight" {
@@ -392,6 +416,7 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 	manifest.State = "transferring"
 	manifest.CreatedAt = time.Now().UTC()
 	manifest.InstanceFingerprint = instanceFingerprint(s.cfg.ControlToken)
+	manifest.RequestID, manifest.BaseJobID = requestID, baseID
 	if err := signIncrementalManifest(manifest, s.cfg.ControlToken); err != nil {
 		s.recoverPrimary()
 		_ = fence.Release()
