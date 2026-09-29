@@ -656,6 +656,47 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	if !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
 		return errors.New("incremental staging path must be a real directory")
 	}
+	if err := os.Chmod(stage, 0o700); err != nil {
+		return err
+	}
+	// Keep directories writable while their children are reconstructed;
+	// the manifest permissions are restored after the complete tree exists.
+	directories := make([]TreeEntry, 0)
+	for _, entry := range manifest.Files {
+		if entry.Type == "dir" {
+			directories = append(directories, entry)
+		}
+	}
+	slices.SortFunc(directories, func(a, b TreeEntry) int {
+		depthA, depthB := strings.Count(a.Path, "/"), strings.Count(b.Path, "/")
+		if depthA != depthB {
+			return depthA - depthB
+		}
+		return strings.Compare(a.Path, b.Path)
+	})
+	for _, entry := range directories {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		dst := filepath.Join(stage, filepath.FromSlash(entry.Path))
+		info, err := os.Lstat(dst)
+		if err == nil {
+			if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+				if err := os.Chmod(dst, 0o700); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := os.RemoveAll(dst); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.Mkdir(dst, 0o700); err != nil {
+			return err
+		}
+	}
 	oldEntries := map[string]TreeEntry{}
 	oldChunks := map[string]chunkLocation{}
 	verifyLocal := previous != nil && !manifest.FullScanAt.IsZero() && manifest.FullScanAt.After(previous.FullScanAt)
@@ -665,7 +706,6 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 		}
 		oldChunks = indexManifest(previous)
 	}
-	var directories []TreeEntry
 	for _, entry := range manifest.Files {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -673,20 +713,12 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 		dst := filepath.Join(stage, filepath.FromSlash(entry.Path))
 		switch entry.Type {
 		case "dir":
-			// Keep directories writable while their children are reconstructed;
-			// the manifest permissions are restored after the complete tree exists.
-			if err := os.MkdirAll(dst, 0o700); err != nil {
-				return err
-			}
-			directories = append(directories, entry)
+			continue
 		case "symlink":
-			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-				return err
-			}
 			if target, err := os.Readlink(dst); err == nil && target == entry.LinkTarget {
 				continue
 			}
-			if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+			if err := os.RemoveAll(dst); err != nil {
 				return err
 			}
 			if err := os.Symlink(entry.LinkTarget, dst); err != nil {
@@ -694,9 +726,6 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			}
 		case "file":
 			if reusableWholeFile(dst, entry) {
-				if !verifyLocal {
-					continue
-				}
 				matches, err := fileMatchesManifestChunks(ctx, dst, entry)
 				if err == nil && matches {
 					continue
@@ -726,6 +755,13 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 				}
 			}
 			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+				return err
+			}
+			if info, err := os.Lstat(dst); err == nil && info.IsDir() {
+				if err := os.RemoveAll(dst); err != nil {
+					return err
+				}
+			} else if err != nil && !os.IsNotExist(err) {
 				return err
 			}
 			tmp := dst + ".replication-tmp"
