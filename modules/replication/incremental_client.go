@@ -333,7 +333,7 @@ func requestSnapshotStatus(ctx context.Context, client *http.Client, base, token
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("snapshot %s returned %s", id, resp.Status)
+		return nil, responseStatusError("snapshot "+id, resp)
 	}
 	var snapshot Snapshot
 	if err := decodeBoundedJSON(resp.Body, 1<<20, &snapshot); err != nil {
@@ -350,8 +350,9 @@ func requestManifestByID(ctx context.Context, client *http.Client, base, token, 
 			return nil, err
 		}
 		if resp.StatusCode != http.StatusOK {
+			err := responseStatusError("snapshot manifest "+id, resp)
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("snapshot manifest %s returned %s", id, resp.Status)
+			return nil, err
 		}
 		if resp.ContentLength > maxManifestSize {
 			_ = resp.Body.Close()
@@ -444,8 +445,9 @@ func requestChunk(ctx context.Context, client *http.Client, base, token, id, has
 			return nil, &chunkChangedError{hash: hash, status: resp.Status}
 		}
 		if resp.StatusCode != http.StatusOK {
+			err := responseStatusError("chunk "+hash, resp)
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("chunk %s returned %s", hash, resp.Status)
+			return nil, err
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, chunkMaxSize+1))
 		_ = resp.Body.Close()
@@ -473,7 +475,7 @@ func finishRemoteSession(ctx context.Context, client *http.Client, base, token, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s sync session returned %s", action, resp.Status)
+		return responseStatusError(action+" sync session", resp)
 	}
 	return nil
 }
@@ -1124,7 +1126,9 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 		if !completed && abortSession {
 			abortCtx, cancel := context.WithTimeout(context.Background(), cfg.ServiceTimeout)
 			log.Warn("Final sync session %s did not complete; aborting remote session", final.ID)
-			_ = finishRemoteSession(abortCtx, client, base, cfg.ControlToken, final.ID, "abort")
+			if err := finishRemoteSession(abortCtx, client, base, cfg.ControlToken, final.ID, "abort"); err != nil {
+				log.Warn("Abort remote final sync session failed: snapshot=%s error=%v", final.ID, err)
+			}
 			cancel()
 		}
 	}()
@@ -1246,12 +1250,15 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 	previous := previousManifest(currentPath, cfg.ControlToken)
 	trustedBaseline := previous != nil
 	if previous == nil {
-		local, err := scanIncrementalTree(ctx, filepath.Clean(setting.AppWorkPath))
+		root := filepath.Clean(setting.AppWorkPath)
+		indexStarted := time.Now()
+		log.Info("Indexing existing standby data for verified chunk reuse: path=%s", root)
+		local, err := scanIncrementalTree(ctx, root)
 		if err != nil {
-			log.Warn("Cannot index existing standby data for chunk reuse: %v", err)
+			log.Warn("Cannot index existing standby data for chunk reuse: duration=%s error=%v", time.Since(indexStarted), err)
 		} else {
 			previous = local
-			log.Info("No trusted standby baseline; indexed %d local files for verified chunk reuse", local.FileCount)
+			log.Info("No trusted standby baseline; indexed local data for verified chunk reuse: files=%d bytes=%d duration=%s", local.FileCount, local.Size, time.Since(indexStarted))
 		}
 	}
 	cacheDir := filepath.Join(cfg.SnapshotDir, ".chunks")
@@ -1276,20 +1283,25 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 			checkpoint := recoveryPreflight
 			recoveryPreflight = nil
 			log.Info("Requesting verified preflight recovery checkpoint %s", checkpoint.ID)
+			requestStarted := time.Now()
 			preflight, err = requestManifest(ctx, client, base, cfg.ControlToken, "preflight?resume="+checkpoint.ID)
 			if err != nil {
 				if !strings.Contains(err.Error(), "preflight recovery checkpoint is unavailable or invalid") {
+					log.Error("Preflight recovery checkpoint request failed: snapshot=%s duration=%s error=%v", checkpoint.ID, time.Since(requestStarted), err)
 					return err
 				}
 				log.Warn("Preflight recovery checkpoint %s is unavailable; request a new preflight", checkpoint.ID)
 			} else if preflight.SHA256 != checkpoint.SHA256 {
+				log.Error("Preflight recovery checkpoint does not match local manifest: snapshot=%s", checkpoint.ID)
 				return errors.New("preflight recovery checkpoint does not match the local manifest")
 			}
 		}
 		if preflight == nil {
 			log.Info("Requesting preflight manifest from %s", redactedEndpointLabel(base))
+			requestStarted := time.Now()
 			preflight, err = requestManifest(ctx, client, base, cfg.ControlToken, "preflight")
 			if err != nil {
+				log.Error("Preflight manifest request failed: duration=%s error=%v", time.Since(requestStarted), err)
 				return err
 			}
 		}
@@ -1302,12 +1314,14 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 			return err
 		}
 		log.Info("Requesting final sync manifest based on preflight %s", preflight.ID)
+		requestStarted := time.Now()
 		final, err := requestManifest(ctx, client, base, cfg.ControlToken, "final?base="+preflight.ID)
 		if err != nil {
 			if finalizeAttempt == 1 && strings.Contains(err.Error(), "preflight base is unavailable or invalid") {
 				log.Warn("Finalize rejected preflight base %s; rerun preflight once", preflight.ID)
 				continue
 			}
+			log.Error("Final sync manifest request failed: preflight=%s duration=%s error=%v", preflight.ID, time.Since(requestStarted), err)
 			return err
 		}
 		if err := persistStandbyManifest(cfg.SnapshotDir, final); err != nil {

@@ -233,6 +233,7 @@ func (s *controlServer) auth(next http.HandlerFunc) http.HandlerFunc {
 		got := sha256.Sum256([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")))
 		want := sha256.Sum256([]byte(s.cfg.ControlToken))
 		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+			log.Warn("Reject unauthorized replication control request: method=%s path=%s remote=%s", r.Method, r.URL.EscapedPath(), r.RemoteAddr)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -249,16 +250,17 @@ func (s *controlServer) syncTasks(w http.ResponseWriter, r *http.Request) {
 		var request syncJobRequest
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSyncJobRequestSize))
 		if err != nil {
-			log.Warn("Reject replication sync job request with unreadable or oversized body: %v", err)
+			log.Warn("Reject replication sync job request with unreadable or oversized body: remote=%s error=%v", r.RemoteAddr, err)
 			http.Error(w, "invalid sync job request", http.StatusBadRequest)
 			return
 		}
 		if err := json.Unmarshal(body, &request); err != nil {
-			log.Warn("Reject malformed replication sync job request: %v", err)
+			log.Warn("Reject malformed replication sync job request: remote=%s error=%v", r.RemoteAddr, err)
 			http.Error(w, "invalid sync job request", http.StatusBadRequest)
 			return
 		}
 		if request.RequestID != "" && !validReplicationRequestID(request.RequestID) {
+			log.Warn("Reject replication sync job request with invalid request ID: kind=%s remote=%s", request.Kind, r.RemoteAddr)
 			http.Error(w, "invalid sync job request ID", http.StatusBadRequest)
 			return
 		}
@@ -271,6 +273,7 @@ func (s *controlServer) syncTasks(w http.ResponseWriter, r *http.Request) {
 			r.Header.Set("Idempotency-Key", request.RequestID)
 			s.finalize(w, r)
 		default:
+			log.Warn("Reject replication sync job request with invalid kind %q: remote=%s", request.Kind, r.RemoteAddr)
 			http.Error(w, "sync job kind must be preflight or final", http.StatusBadRequest)
 		}
 		return
