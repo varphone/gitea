@@ -32,7 +32,10 @@ type syncJobRequest struct {
 	RequestID   string `json:"request_id,omitempty"`
 }
 
-const syncJobsPath = "/api/v1/replication/sync-jobs"
+const (
+	syncJobsPath          = "/api/v1/replication/sync-jobs"
+	maxSyncJobRequestSize = 1 << 20
+)
 
 func validReplicationRequestID(id string) bool {
 	if len(id) != 32 {
@@ -241,8 +244,14 @@ func (s *controlServer) health(w http.ResponseWriter, _ *http.Request) {
 func (s *controlServer) syncTasks(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		var request syncJobRequest
-		decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-		if err := decoder.Decode(&request); err != nil {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSyncJobRequestSize))
+		if err != nil {
+			log.Warn("Reject replication sync job request with unreadable or oversized body: %v", err)
+			http.Error(w, "invalid sync job request", http.StatusBadRequest)
+			return
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			log.Warn("Reject malformed replication sync job request: %v", err)
 			http.Error(w, "invalid sync job request", http.StatusBadRequest)
 			return
 		}
