@@ -4,6 +4,7 @@
 package replication
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -279,10 +281,15 @@ func (s *controlServer) syncTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if manifest := s.getTaskManifest(id); manifest != nil {
-			writeJSON(w, manifest)
+			writeJSONMaybeGzip(w, r, manifest)
 			return
 		}
-		http.ServeFile(w, r, manifestPath(s.cfg.SnapshotDir, id))
+		manifest, err := loadTrustedManifest(manifestPath(s.cfg.SnapshotDir, id), s.cfg.ControlToken, job.State)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSONMaybeGzip(w, r, manifest)
 		return
 	}
 	if len(parts) != 1 {
@@ -379,6 +386,46 @@ func pruneManifestFiles(dir string, retention int) {
 
 func writeJSON(w http.ResponseWriter, value any) {
 	writeJSONStatus(w, http.StatusOK, value)
+}
+
+func writeJSONMaybeGzip(w http.ResponseWriter, r *http.Request, payload any) {
+	w.Header().Add("Vary", "Accept-Encoding")
+	for _, header := range r.Header.Values("Accept-Encoding") {
+		for item := range strings.SplitSeq(header, ",") {
+			encoding, parameters, _ := strings.Cut(strings.TrimSpace(item), ";")
+			if !strings.EqualFold(encoding, "gzip") {
+				continue
+			}
+			quality := 1.0
+			for parameter := range strings.SplitSeq(parameters, ";") {
+				name, parameterValue, ok := strings.Cut(strings.TrimSpace(parameter), "=")
+				if !ok || !strings.EqualFold(name, "q") {
+					continue
+				}
+				parsed, err := strconv.ParseFloat(parameterValue, 64)
+				if err != nil || !(parsed >= 0 && parsed <= 1) {
+					writeJSON(w, payload)
+					return
+				}
+				quality = parsed
+			}
+			if quality == 0 {
+				writeJSON(w, payload)
+				return
+			}
+			writer, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
+			if err != nil {
+				writeJSON(w, payload)
+				return
+			}
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(payload)
+			_ = writer.Close()
+			return
+		}
+	}
+	writeJSON(w, payload)
 }
 
 func writeJSONStatus(w http.ResponseWriter, status int, value any) {

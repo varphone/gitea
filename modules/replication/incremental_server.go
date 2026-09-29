@@ -173,13 +173,13 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Info("Resuming preflight checkpoint %s", resumeID)
-		writeJSON(w, manifest)
+		writeJSONMaybeGzip(w, r, manifest)
 		return
 	}
 	if manifest := s.reusablePreflightLocked(time.Now().UTC()); manifest != nil {
 		s.mu.Unlock()
 		log.Info("Reuse completed preflight checkpoint %s", manifest.ID)
-		writeJSON(w, manifest)
+		writeJSONMaybeGzip(w, r, manifest)
 		return
 	}
 	id := time.Now().UTC().Format(snapshotIDLayout)

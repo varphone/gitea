@@ -918,10 +918,7 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 		return err
 	}
 	log.Info("Prepared incremental stage for snapshot %s", final.ID)
-	if err := syncTree(ctx, stage); err != nil {
-		return fmt.Errorf("persist incremental stage: %w", err)
-	}
-	log.Info("Persisted incremental stage for snapshot %s; atomically activating it on the standby", final.ID)
+	log.Info("Activating incremental stage for snapshot %s on the standby", final.ID)
 	if err := installPreparedSnapshot(ctx, stage, &final.Snapshot, cfg); err != nil {
 		var warning *cleanupWarning
 		if !errors.As(err, &warning) {

@@ -75,6 +75,7 @@ The replication control plane exposes one stable, internal resource API. Create 
 
 `/api/v1/replication/health` remains the health endpoint. These endpoints are internal to the
 replication controller and require its bearer token.
+Manifest responses use gzip when the client advertises it, reducing transfer size for large trees.
 
 ## Configuration
 

@@ -63,6 +63,14 @@ func gearValue(b byte) uint64 {
 	return x ^ (x >> 31)
 }
 
+var gearValueTable = func() [256]uint64 {
+	var table [256]uint64
+	for i := range table {
+		table[i] = gearValue(byte(i))
+	}
+	return table
+}()
+
 // splitFile uses content-defined boundaries, so an insertion does not
 // invalidate every following chunk as fixed-size blocks would.
 func splitFile(ctx context.Context, path string) ([]ChunkDescriptor, error) {
@@ -102,7 +110,7 @@ func splitFile(ctx context.Context, path string) ([]ChunkDescriptor, error) {
 		n, readErr := f.Read(buffer)
 		segmentStart := 0
 		for i, b := range buffer[:n] {
-			rolling = (rolling << 1) + gearValue(b)
+			rolling = (rolling << 1) + gearValueTable[b]
 			offset++
 			size++
 			if size >= chunkMinSize && ((rolling&uint64(chunkAverageSize-1)) == 0 || size >= chunkMaxSize) {
@@ -256,10 +264,11 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		e := TreeEntry{Path: rel, Mode: uint32(info.Mode().Perm()), ModTimeNS: info.ModTime().UnixNano(), ChangeID: fileChangeID(info)}
+		e := TreeEntry{Path: rel, Mode: uint32(info.Mode().Perm())}
 		switch {
 		case info.IsDir():
 			e.Type = "dir"
+			e.ModTimeNS = info.ModTime().UnixNano()
 		case info.Mode()&os.ModeSymlink != 0:
 			e.Type = "symlink"
 			e.LinkTarget, err = os.Readlink(path)
@@ -271,6 +280,7 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 			}
 		case info.Mode().IsRegular():
 			e.Type, e.Size = "file", info.Size()
+			e.ModTimeNS, e.ChangeID = info.ModTime().UnixNano(), fileChangeID(info)
 			old, hasOld := baseEntries[rel]
 			metadataUnchanged := hasOld && old.Type == "file" && old.Size == info.Size() &&
 				old.Mode == uint32(info.Mode().Perm()) && old.ModTimeNS == info.ModTime().UnixNano() &&
