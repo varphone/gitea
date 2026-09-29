@@ -193,6 +193,20 @@ func RestoreLatest(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	lock, err := acquireRestoreRunLock(cfg.SnapshotDir)
+	if err != nil {
+		if errors.Is(err, errRestoreAlreadyRunning) {
+			log.Info("Standby replication restore not started: another restore is already running")
+		} else {
+			log.Error("Cannot acquire standby replication restore lock: %v", err)
+		}
+		return err
+	}
+	defer func() {
+		if err := lock.Release(); err != nil {
+			log.Error("Release standby replication restore lock failed: %v", err)
+		}
+	}()
 	base := incrementalBase(cfg)
 	started := time.Now()
 	log.Info("Starting standby replication restore: source=%s snapshot_dir=%s", redactedEndpointLabel(base), cfg.SnapshotDir)
