@@ -68,8 +68,15 @@ func syncTree(ctx context.Context, root string) error {
 }
 
 func writeFileSynced(path string, data []byte, mode os.FileMode) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	dir := filepath.Dir(path)
+	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
+		return err
+	}
+	tmp := file.Name()
+	defer os.Remove(tmp)
+	if err := file.Chmod(mode); err != nil {
+		_ = file.Close()
 		return err
 	}
 	_, writeErr := file.Write(data)
@@ -78,5 +85,8 @@ func writeFileSynced(path string, data []byte, mode os.FileMode) error {
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
 		return err
 	}
-	return syncDirectory(filepath.Dir(path))
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncDirectory(dir)
 }
