@@ -759,6 +759,11 @@ func pruneUnexpectedStageEntries(ctx context.Context, stage string, manifest *Sn
 		}
 		rel = filepath.ToSlash(rel)
 		if _, ok := expected[rel]; !ok {
+			if info.IsDir() {
+				if err := os.Chmod(path, 0o700); err != nil {
+					return fmt.Errorf("make unexpected staging directory %q removable: %w", rel, err)
+				}
+			}
 			if err := os.RemoveAll(path); err != nil {
 				return fmt.Errorf("remove unexpected staging entry %q: %w", rel, err)
 			}
