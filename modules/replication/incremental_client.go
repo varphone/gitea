@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -539,10 +540,31 @@ func cachedChunkAvailable(cacheDir, hash string, size int64) bool {
 
 func readCachedChunk(cacheDir, hash string) ([]byte, error) {
 	path := cachePath(cacheDir, hash)
-	if err := verifyFile(path, hash); err != nil {
+	file, err := os.Open(path)
+	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(path)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > chunkMaxSize {
+		return nil, errors.New("cached chunk is not a regular file within the size limit")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, chunkMaxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > chunkMaxSize {
+		return nil, errors.New("cached chunk exceeds maximum size")
+	}
+	sum := sha256.Sum256(data)
+	actual := hex.EncodeToString(sum[:])
+	if actual != hash {
+		return nil, fmt.Errorf("cached chunk sha256 mismatch: got %s want %s", actual, hash)
+	}
+	return data, nil
 }
 
 func transferRateMiBPerSecond(size int64, duration time.Duration) float64 {
