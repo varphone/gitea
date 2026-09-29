@@ -748,9 +748,17 @@ func sameFile(a, b TreeEntry) bool {
 }
 
 func reusableWholeFile(path string, entry TreeEntry) bool {
+	_, ok := reusableWholeFileInfo(path, entry)
+	return ok
+}
+
+func reusableWholeFileInfo(path string, entry TreeEntry) (os.FileInfo, bool) {
 	info, err := os.Lstat(path)
-	return err == nil && info.Mode().IsRegular() && info.Size() == entry.Size &&
-		uint32(info.Mode().Perm()) == entry.Mode && info.ModTime().UnixNano() == entry.ModTimeNS
+	if err != nil || !info.Mode().IsRegular() || info.Size() != entry.Size ||
+		uint32(info.Mode().Perm()) != entry.Mode || info.ModTime().UnixNano() != entry.ModTimeNS {
+		return nil, false
+	}
+	return info, true
 }
 
 func fileMatchesManifestChunks(ctx context.Context, path string, entry TreeEntry) (bool, error) {
@@ -899,21 +907,30 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			}
 			old := oldEntries[entry.Path]
 			source := filepath.Join(root, filepath.FromSlash(entry.Path))
-			if sameFile(entry, old) && reusableWholeFile(source, entry) {
-				matches := !verifyLocal
-				if verifyLocal {
-					var err error
-					matches, err = fileMatchesManifestChunks(ctx, source, entry)
-					if err != nil && ctx.Err() != nil {
-						return ctx.Err()
+			if sameFile(entry, old) {
+				sourceInfo, reusable := reusableWholeFileInfo(source, entry)
+				if reusable {
+					matches := !verifyLocal
+					if verifyLocal {
+						var err error
+						matches, err = fileMatchesManifestChunks(ctx, source, entry)
+						if err != nil && ctx.Err() != nil {
+							return ctx.Err()
+						}
 					}
-				}
-				if matches {
-					if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-						return err
-					}
-					if err := os.Link(source, dst); err == nil {
-						continue
+					if matches {
+						if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+							return err
+						}
+						if err := os.Link(source, dst); err == nil {
+							linkedInfo, statErr := os.Lstat(dst)
+							if statErr == nil && linkedInfo.Mode().IsRegular() && os.SameFile(sourceInfo, linkedInfo) {
+								continue
+							}
+							if removeErr := os.Remove(dst); removeErr != nil && !os.IsNotExist(removeErr) {
+								return fmt.Errorf("remove invalid reused staging file %q: %w", entry.Path, removeErr)
+							}
+						}
 					}
 				}
 			}

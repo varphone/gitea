@@ -310,11 +310,11 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 			if err != nil {
 				return scanPathError(rel, err)
 			}
-			after, err := os.Stat(path)
+			after, err := os.Lstat(path)
 			if err != nil {
 				return scanPathError(rel, err)
 			}
-			if after.Size() != beforeSize || after.ModTime() != beforeTime || fileChangeID(after) != beforeChangeID {
+			if !after.Mode().IsRegular() || after.Size() != beforeSize || after.ModTime() != beforeTime || fileChangeID(after) != beforeChangeID {
 				return fmt.Errorf("%w: %s", errIncrementalTreeChanged, rel)
 			}
 			if verifyAll && metadataUnchanged && !sameChunks(e.Chunks, old.Chunks) {
