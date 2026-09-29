@@ -26,7 +26,11 @@ type finalSyncSession struct {
 	finished  chan struct{}
 }
 
-const baselineManifestName = "baseline.json"
+const (
+	baselineManifestName = "baseline.json"
+	// Reuse recent checkpoints for request retries; scheduled restores must rescan live data.
+	reusablePreflightMaxAge = 5 * time.Minute
+)
 
 func baselineManifestPath(dir string) string {
 	return filepath.Join(dir, baselineManifestName)
@@ -47,7 +51,7 @@ func (s *controlServer) finalSessionTimeout() time.Duration {
 func (s *controlServer) reusablePreflightLocked(now time.Time) *SnapshotManifest {
 	var latest *SnapshotManifest
 	for _, manifest := range s.taskManifests {
-		if manifest.State != "preflight" || s.fullScanDue(manifest, now) {
+		if manifest.State != "preflight" || s.fullScanDue(manifest, now) || !preflightIsFresh(manifest, now) {
 			continue
 		}
 		if latest == nil || manifest.CreatedAt.After(latest.CreatedAt) {
@@ -56,6 +60,11 @@ func (s *controlServer) reusablePreflightLocked(now time.Time) *SnapshotManifest
 		}
 	}
 	return latest
+}
+
+func preflightIsFresh(manifest *SnapshotManifest, now time.Time) bool {
+	age := now.Sub(manifest.CreatedAt)
+	return age >= -reusablePreflightMaxAge && age <= reusablePreflightMaxAge
 }
 
 func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
@@ -223,7 +232,7 @@ func (s *controlServer) runPreflightTask(id string) {
 	s.setTaskManifest(manifest)
 	log.Info("Preflight task %s completed", id)
 	s.completeAsyncJob(id, manifest.Snapshot)
-	pruneManifestFiles(s.cfg.SnapshotDir, s.cfg.SnapshotRetention)
+	s.prune()
 }
 
 func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
@@ -464,16 +473,19 @@ func (s *controlServer) syncSnapshot(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		manifest := s.getTaskManifest(id)
-		if manifest == nil {
-			var err error
-			manifest, err = loadManifestFile(manifestPath(s.cfg.SnapshotDir, id))
-			if err != nil {
-				http.NotFound(w, r)
-				return
+		location, ok, indexed := s.getTaskChunkLocation(id, value)
+		if !indexed {
+			manifest := s.getTaskManifest(id)
+			if manifest == nil {
+				var err error
+				manifest, err = loadManifestFile(manifestPath(s.cfg.SnapshotDir, id))
+				if err != nil {
+					http.NotFound(w, r)
+					return
+				}
 			}
+			location, ok = indexManifest(manifest)[value]
 		}
-		location, ok := indexManifest(manifest)[value]
 		if !ok {
 			http.NotFound(w, r)
 			return

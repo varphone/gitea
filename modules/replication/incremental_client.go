@@ -504,12 +504,13 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 			available[hash] = struct{}{}
 		}
 	}
-	total := len(indexManifest(manifest))
+	manifestChunks := indexManifest(manifest)
+	total := len(manifestChunks)
 	fetched := 0
 	deferred := 0
 	skipped := 0
 	processed := 0
-	for hash := range indexManifest(manifest) {
+	for hash := range manifestChunks {
 		if _, ok := available[hash]; ok || cacheHas(cacheDir, hash) {
 			skipped++
 			processed++
@@ -571,9 +572,18 @@ func reusableWholeFile(path string, entry TreeEntry) bool {
 		uint32(info.Mode().Perm()) == entry.Mode && info.ModTime().UnixNano() == entry.ModTimeNS
 }
 
+func fileMatchesManifestChunks(ctx context.Context, path string, entry TreeEntry) (bool, error) {
+	chunks, err := splitFile(ctx, path)
+	if err != nil {
+		return false, err
+	}
+	return sameChunks(chunks, entry.Chunks), nil
+}
+
 func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, manifest, previous *SnapshotManifest, fetch func(string) ([]byte, error)) error {
 	oldEntries := map[string]TreeEntry{}
 	oldChunks := map[string]chunkLocation{}
+	verifyLocal := previous != nil && !manifest.FullScanAt.IsZero() && manifest.FullScanAt.After(previous.FullScanAt)
 	if previous != nil {
 		for _, entry := range previous.Files {
 			oldEntries[entry.Path] = entry
@@ -609,16 +619,35 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			}
 		case "file":
 			if reusableWholeFile(dst, entry) {
-				continue
+				if !verifyLocal {
+					continue
+				}
+				matches, err := fileMatchesManifestChunks(ctx, dst, entry)
+				if err == nil && matches {
+					continue
+				}
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 			}
 			old := oldEntries[entry.Path]
 			source := filepath.Join(root, filepath.FromSlash(entry.Path))
 			if sameFile(entry, old) && reusableWholeFile(source, entry) {
-				if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-					return err
+				matches := !verifyLocal
+				if verifyLocal {
+					var err error
+					matches, err = fileMatchesManifestChunks(ctx, source, entry)
+					if err != nil && ctx.Err() != nil {
+						return ctx.Err()
+					}
 				}
-				if err := os.Link(source, dst); err == nil {
-					continue
+				if matches {
+					if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+						return err
+					}
+					if err := os.Link(source, dst); err == nil {
+						continue
+					}
 				}
 			}
 			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
@@ -731,10 +760,11 @@ func resumablePreflightManifest(snapshotDir, token string) *SnapshotManifest {
 	if err != nil {
 		return nil
 	}
+	now := time.Now().UTC()
 	var latest *SnapshotManifest
 	for _, path := range paths {
 		manifest, err := loadTrustedManifest(path, token, "preflight")
-		if err != nil || (latest != nil && !manifest.CreatedAt.After(latest.CreatedAt)) {
+		if err != nil || !preflightIsFresh(manifest, now) || (latest != nil && !manifest.CreatedAt.After(latest.CreatedAt)) {
 			continue
 		}
 		latest = manifest

@@ -433,13 +433,37 @@ func storeChunk(cacheDir, hash string, data []byte) error {
 		return errors.New("received chunk hash mismatch")
 	}
 	path := cachePath(cacheDir, hash)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if _, err := os.Stat(path); err == nil {
-		return nil
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode().IsRegular() && verifyFile(path, hash) == nil {
+			return nil
+		}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-	return writeFileSynced(path, data, 0o600)
+	file, err := os.CreateTemp(dir, "."+hash+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := file.Name()
+	defer os.Remove(tmp)
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	_, writeErr := file.Write(data)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncDirectory(dir)
 }
 
 func loadManifestFile(path string) (*SnapshotManifest, error) {

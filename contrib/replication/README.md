@@ -31,6 +31,9 @@ fingerprint and an HMAC signature.
 
 The standby drives every synchronization:
 
+A completed preflight is reused for up to five minutes to recover request
+retries; later restore runs scan current primary metadata again.
+
 1. While the primary is online, it walks the filesystem metadata and compares
    it with the last authenticated successful baseline. Files with unchanged
    size, mode, nanosecond modification time, inode, and Linux ctime reuse their
@@ -106,6 +109,10 @@ all paths and perform metadata checks, so their cost is proportional to the
 number of filesystem entries, while bytes read are proportional to changed
 files. Repositories with millions of loose Git objects may therefore still
 benefit from normal Git maintenance and repacking.
+
+When a full verification advances the manifest checkpoint, the standby also
+rehashes locally reused files before installation. Corrupt local files are
+rebuilt from the authenticated source chunks.
 
 On the standby use `MODE = replica`, set `SOURCE_URL` to the primary Gitea
 URL and optionally set `CONTROL_SOURCE_URL` to

@@ -7,9 +7,26 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"gitea.dev/modules/setting"
 )
 
 const replicaReadOnlyMessage = "disaster-recovery replica is read-only; login and write operations are disabled until an operator promotes this node after fencing the primary"
+
+var replicaStateChangingRoutes = [...]string{
+	"/user/activate",
+	"/user/activate_email",
+	"/user/forgot_password",
+	"/user/link_account",
+	"/user/login",
+	"/user/logout",
+	"/user/oauth2",
+	"/user/recover_account",
+	"/user/sign_up",
+	"/user/two_factor",
+	"/user/webauthn",
+	"/login/oauth",
+}
 
 func writeReplicaReadOnlyResponse(w http.ResponseWriter, request *http.Request) {
 	if !strings.Contains(request.Header.Get("Accept"), "text/html") {
@@ -24,14 +41,30 @@ func writeReplicaReadOnlyResponse(w http.ResponseWriter, request *http.Request) 
 <body><header class="nav"><span class="mark"></span>GITEA</header><main class="page"><section class="card"><div class="status">503 · DISASTER RECOVERY REPLICA</div><h1>此备用节点处于只读灾难恢复模式</h1><p>为保证与主节点的数据一致性，此节点拒绝登录以及所有会写入数据的操作。浏览、克隆和其他只读访问不受影响。</p><div class="notice"><strong>请勿通过修改数据库或绕过限制登录。</strong> 这会破坏后续同步和故障切换的可靠性。</div><h2>需要在此节点恢复服务？</h2><ol><li>先隔离或确认主节点已停止，避免双主写入。</li><li>停止备用节点的 restore timer。</li><li>将 <code>[replicate] MODE</code> 改为 <code>primary</code>，重启 replication 服务后再启动 Gitea。</li></ol><a class="button" href="/">返回首页</a><div class="foot">该限制由 Gitea disaster-recovery replication 保护机制强制执行。</div></section></main></body></html>`)
 }
 
-// ReadOnlyMiddleware permits only side-effect-free HTTP methods on a replica.
+// ReadOnlyMiddleware blocks writes and known state-changing GET routes on a replica.
 func ReadOnlyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			if isReplicaStateChangingRoute(request.URL.Path) {
+				writeReplicaReadOnlyResponse(w, request)
+				return
+			}
 			next.ServeHTTP(w, request)
 		default:
 			writeReplicaReadOnlyResponse(w, request)
 		}
 	})
+}
+
+func isReplicaStateChangingRoute(path string) bool {
+	if subURL := strings.TrimSuffix(setting.AppSubURL, "/"); subURL != "" && strings.HasPrefix(path, subURL+"/") {
+		path = strings.TrimPrefix(path, subURL)
+	}
+	for _, prefix := range replicaStateChangingRoutes {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }

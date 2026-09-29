@@ -64,29 +64,7 @@ func validSnapshotID(id string) bool { _, err := time.Parse(snapshotIDLayout, id
 func manifestPath(dir, id string) string { return filepath.Join(dir, id+".json") }
 
 func writeManifest(dir string, manifest *SnapshotManifest) error {
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-	if len(data) > maxManifestSize {
-		return errors.New("incremental manifest exceeds maximum size")
-	}
-	tmp := manifestPath(dir, manifest.ID) + ".tmp"
-	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	_, writeErr := file.Write(data)
-	syncErr := file.Sync()
-	closeErr := file.Close()
-	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, manifestPath(dir, manifest.ID)); err != nil {
-		return err
-	}
-	return syncDirectory(dir)
+	return writeManifestAt(manifestPath(dir, manifest.ID), manifest)
 }
 
 func loadManifests(dir, token string) (map[string]*Snapshot, error) {

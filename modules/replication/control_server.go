@@ -44,13 +44,14 @@ type Snapshot struct {
 const snapshotStateCreating = "creating"
 
 type controlServer struct {
-	cfg           *config
-	mu            sync.RWMutex
-	jobs          map[string]*Snapshot
-	taskManifests map[string]*SnapshotManifest
-	busy          bool
-	session       *finalSyncSession
-	dataRoot      string
+	cfg              *config
+	mu               sync.RWMutex
+	jobs             map[string]*Snapshot
+	taskManifests    map[string]*SnapshotManifest
+	taskChunkIndexes map[string]map[string]chunkLocation
+	busy             bool
+	session          *finalSyncSession
+	dataRoot         string
 }
 
 func (s *controlServer) root() string {
@@ -81,7 +82,10 @@ func ServeControl(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s := &controlServer{cfg: cfg, jobs: jobs, taskManifests: map[string]*SnapshotManifest{}}
+	s := &controlServer{
+		cfg: cfg, jobs: jobs, taskManifests: map[string]*SnapshotManifest{},
+		taskChunkIndexes: map[string]map[string]chunkLocation{},
+	}
 	removeLegacyArchives(cfg.SnapshotDir)
 	primaryRecoveryRequired := false
 	for id, job := range jobs {
@@ -94,6 +98,7 @@ func ServeControl(ctx context.Context) error {
 				continue
 			}
 			s.taskManifests[id] = manifest
+			s.taskChunkIndexes[id] = indexManifest(manifest)
 			jobs[id] = job
 		case "transferring":
 			primaryRecoveryRequired = true
@@ -291,10 +296,14 @@ func (s *controlServer) prune() {
 	pruneManifestFiles(s.cfg.SnapshotDir, s.cfg.SnapshotRetention)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for id := range s.jobs {
+	for id, job := range s.jobs {
+		if job.State == snapshotStateCreating {
+			continue
+		}
 		if _, err := os.Stat(manifestPath(s.cfg.SnapshotDir, id)); os.IsNotExist(err) {
 			delete(s.jobs, id)
 			delete(s.taskManifests, id)
+			delete(s.taskChunkIndexes, id)
 		}
 	}
 }
@@ -310,6 +319,14 @@ func (s *controlServer) getTaskManifest(id string) *SnapshotManifest {
 	return &manifestCopy
 }
 
+func (s *controlServer) getTaskChunkLocation(id, hash string) (chunkLocation, bool, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	index, indexed := s.taskChunkIndexes[id]
+	location, ok := index[hash]
+	return location, ok, indexed
+}
+
 func (s *controlServer) setTaskManifest(manifest *SnapshotManifest) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -318,6 +335,10 @@ func (s *controlServer) setTaskManifest(manifest *SnapshotManifest) {
 	}
 	manifestCopy := *manifest
 	s.taskManifests[manifest.ID] = &manifestCopy
+	if s.taskChunkIndexes == nil {
+		s.taskChunkIndexes = map[string]map[string]chunkLocation{}
+	}
+	s.taskChunkIndexes[manifest.ID] = indexManifest(&manifestCopy)
 }
 
 func pruneManifestFiles(dir string, retention int) {

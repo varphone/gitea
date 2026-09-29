@@ -137,13 +137,21 @@ func loadConfig() (*config, error) {
 	return cfg, nil
 }
 
-// WriteFencingEnabled reports whether SSH writes must participate in the DR flock.
+// IsReplicaReadOnly reports whether the configured replica must reject writes.
 func IsReplicaReadOnly() bool {
-	cfg, err := loadConfig()
-	return err == nil && cfg.Enabled && cfg.Mode == modeReplica
+	readOnly, _, err := WriteProtection()
+	if err != nil {
+		log.Error("Invalid [replicate] configuration; denying writes: %v", err)
+		return true
+	}
+	return readOnly
 }
 
-func WriteFencingEnabled() bool {
+// WriteProtection returns the write policy for the current instance.
+func WriteProtection() (readOnly, fencingEnabled bool, err error) {
 	cfg, err := loadConfig()
-	return err == nil && cfg.Enabled && cfg.ControlToken != ""
+	if err != nil {
+		return false, false, err
+	}
+	return cfg.Enabled && cfg.Mode == modeReplica, cfg.Enabled && cfg.ControlToken != "", nil
 }
