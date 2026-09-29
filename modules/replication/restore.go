@@ -63,12 +63,26 @@ func validSnapshotID(id string) bool { _, err := time.Parse(snapshotIDLayout, id
 
 func manifestPath(dir, id string) string { return filepath.Join(dir, id+".json") }
 
+func listManifestPaths(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			paths = append(paths, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return paths, nil
+}
+
 func writeManifest(dir string, manifest *SnapshotManifest) error {
 	return writeManifestAt(manifestPath(dir, manifest.ID), manifest)
 }
 
 func loadManifests(dir, token string) (map[string]*Snapshot, error) {
-	paths, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	paths, err := listManifestPaths(dir)
 	if err != nil {
 		return nil, err
 	}

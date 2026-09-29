@@ -68,7 +68,10 @@ func preflightIsFresh(manifest *SnapshotManifest, now time.Time) bool {
 
 func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
 	paths := []string{baselineManifestPath(s.cfg.SnapshotDir)}
-	history, _ := filepath.Glob(filepath.Join(s.cfg.SnapshotDir, "*.json"))
+	history, err := listManifestPaths(s.cfg.SnapshotDir)
+	if err != nil {
+		log.Warn("Cannot list replication manifests in %s for preflight planning: %v", s.cfg.SnapshotDir, err)
+	}
 	sort.Sort(sort.Reverse(sort.StringSlice(history)))
 	paths = append(paths, history...)
 	seen := map[string]struct{}{}

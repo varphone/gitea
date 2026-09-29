@@ -1150,8 +1150,9 @@ func prepareIncrementalStage(cfg *config, final *SnapshotManifest, stage string)
 }
 
 func resumablePreflightManifest(snapshotDir, token string) *SnapshotManifest {
-	paths, err := filepath.Glob(filepath.Join(snapshotDir, "*.json"))
+	paths, err := listManifestPaths(snapshotDir)
 	if err != nil {
+		log.Warn("Cannot list standby manifests for preflight recovery in %s: %v", snapshotDir, err)
 		return nil
 	}
 	now := time.Now().UTC()
@@ -1167,8 +1168,9 @@ func resumablePreflightManifest(snapshotDir, token string) *SnapshotManifest {
 }
 
 func resumableFinalManifest(snapshotDir, token string) *SnapshotManifest {
-	paths, err := filepath.Glob(filepath.Join(snapshotDir, "*.json"))
+	paths, err := listManifestPaths(snapshotDir)
 	if err != nil {
+		log.Warn("Cannot list standby manifests for final recovery in %s: %v", snapshotDir, err)
 		return nil
 	}
 	var latest *SnapshotManifest
