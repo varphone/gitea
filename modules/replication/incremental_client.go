@@ -67,6 +67,25 @@ func retryDelay(attempt int) time.Duration {
 	return delay
 }
 
+func responseRetryDelay(resp *http.Response, fallback time.Duration) time.Duration {
+	if resp == nil {
+		return fallback
+	}
+	retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if retryAfter == "" {
+		return fallback
+	}
+	if delay, err := time.ParseDuration(retryAfter + "s"); err == nil && delay > fallback {
+		return delay
+	}
+	if retryAt, err := http.ParseTime(retryAfter); err == nil {
+		if delay := time.Until(retryAt); delay > fallback {
+			return delay
+		}
+	}
+	return fallback
+}
+
 func shouldRetryHTTPStatus(status int) bool {
 	return status == http.StatusInternalServerError || status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
@@ -90,7 +109,14 @@ func shouldRetryRequestError(err error) bool {
 }
 
 func waitForRetry(ctx context.Context, attempt int, operation string, reason error) error {
-	delay := retryDelay(attempt)
+	return waitForRetryDelay(ctx, attempt, operation, reason, retryDelay(attempt))
+}
+
+func waitForRetryResponse(ctx context.Context, attempt int, operation string, reason error, resp *http.Response) error {
+	return waitForRetryDelay(ctx, attempt, operation, reason, responseRetryDelay(resp, retryDelay(attempt)))
+}
+
+func waitForRetryDelay(ctx context.Context, attempt int, operation string, reason error, delay time.Duration) error {
 	log.Warn("%s failed (%v); retrying in %s (%d/%d)", operation, reason, delay, attempt, requestRetryLimit)
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
@@ -114,9 +140,9 @@ func doRetryableJSONRequest(ctx context.Context, client *http.Client, method, ur
 		resp, err := client.Do(req)
 		if err == nil {
 			if shouldRetryHTTPStatus(resp.StatusCode) && attempt < requestRetryLimit {
-				_ = resp.Body.Close()
 				retryErr := fmt.Errorf("%s returned %s", operation, resp.Status)
-				if err := waitForRetry(ctx, attempt, operation, retryErr); err != nil {
+				_ = resp.Body.Close()
+				if err := waitForRetryResponse(ctx, attempt, operation, retryErr, resp); err != nil {
 					return nil, err
 				}
 				lastErr = retryErr
@@ -155,9 +181,9 @@ func doRetryableRequest(ctx context.Context, client *http.Client, method, url, t
 			continue
 		}
 		if shouldRetryHTTPStatus(resp.StatusCode) && attempt < requestRetryLimit {
-			_ = resp.Body.Close()
 			retryErr := fmt.Errorf("%s returned %s", operation, resp.Status)
-			if err := waitForRetry(ctx, attempt, operation, retryErr); err != nil {
+			_ = resp.Body.Close()
+			if err := waitForRetryResponse(ctx, attempt, operation, retryErr, resp); err != nil {
 				return nil, err
 			}
 			lastErr = retryErr
@@ -280,7 +306,7 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 				if busyWaits == 1 || busyWaits%30 == 0 {
 					log.Info("Primary replication is busy; waiting to create %s job: waits=%d elapsed=%s reason=%q", request.Kind, busyWaits, time.Since(busyStarted), statusErr)
 				}
-				timer := time.NewTimer(syncBusyRetryDelay)
+				timer := time.NewTimer(responseRetryDelay(resp, syncBusyRetryDelay))
 				select {
 				case <-ctx.Done():
 					timer.Stop()
