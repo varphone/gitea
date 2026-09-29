@@ -561,7 +561,7 @@ func gzipChunk(data []byte) (*bytes.Buffer, bool) {
 		releaseChunkGzipBuffer(compressed)
 		return nil, false
 	}
-	if compressed.Len()*100 >= len(data)*(100-minChunkCompressionSave) {
+	if compressed.Len()*100 > len(data)*(100-minChunkCompressionSave) {
 		releaseChunkGzipBuffer(compressed)
 		return nil, false
 	}
