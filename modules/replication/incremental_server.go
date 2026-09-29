@@ -120,11 +120,23 @@ func (s *controlServer) startPrimary() error {
 }
 
 func (s *controlServer) retryPrimaryStart() {
+	s.mu.Lock()
+	if s.primaryRecoveryPending {
+		s.mu.Unlock()
+		log.Info("Primary Gitea recovery retry is already active")
+		return
+	}
+	s.primaryRecoveryPending = true
+	s.mu.Unlock()
+	log.Warn("Primary Gitea recovery is pending; new replication jobs are blocked")
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.SnapshotTimeout)
 		defer cancel()
 		for {
 			if err := s.startPrimary(); err == nil {
+				s.mu.Lock()
+				s.primaryRecoveryPending = false
+				s.mu.Unlock()
 				log.Info("Recovered primary Gitea after incremental sync failure")
 				return
 			} else {
@@ -132,7 +144,7 @@ func (s *controlServer) retryPrimaryStart() {
 			}
 			select {
 			case <-ctx.Done():
-				log.Error("Giving up automatic primary Gitea recovery: %v", ctx.Err())
+				log.Error("Automatic primary Gitea recovery timed out; replication jobs remain blocked: %v", ctx.Err())
 				return
 			case <-time.After(5 * time.Second):
 			}
@@ -153,11 +165,17 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	if s.busy || s.session != nil {
+	if s.busy || s.session != nil || s.primaryRecoveryPending {
+		recoveryPending := s.primaryRecoveryPending
 		s.mu.Unlock()
 		w.Header().Set("Retry-After", "1")
-		log.Info("Preflight request deferred: sync already in progress")
-		http.Error(w, "sync already in progress", http.StatusConflict)
+		if recoveryPending {
+			log.Info("Preflight request deferred: primary Gitea recovery is pending")
+			http.Error(w, "sync already in progress: primary Gitea recovery is pending", http.StatusConflict)
+		} else {
+			log.Info("Preflight request deferred: sync already in progress")
+			http.Error(w, "sync already in progress", http.StatusConflict)
+		}
 		return
 	}
 	if resumeID := r.URL.Query().Get("resume"); resumeID != "" {
@@ -241,11 +259,17 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	if s.busy || s.session != nil {
+	if s.busy || s.session != nil || s.primaryRecoveryPending {
+		recoveryPending := s.primaryRecoveryPending
 		s.mu.Unlock()
 		w.Header().Set("Retry-After", "1")
-		log.Info("Finalize request deferred: sync already in progress")
-		http.Error(w, "sync already in progress", http.StatusConflict)
+		if recoveryPending {
+			log.Info("Finalize request deferred: primary Gitea recovery is pending")
+			http.Error(w, "sync already in progress: primary Gitea recovery is pending", http.StatusConflict)
+		} else {
+			log.Info("Finalize request deferred: sync already in progress")
+			http.Error(w, "sync already in progress", http.StatusConflict)
+		}
 		return
 	}
 	baseID := r.URL.Query().Get("base")

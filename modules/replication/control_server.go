@@ -46,14 +46,15 @@ type Snapshot struct {
 const snapshotStateCreating = "creating"
 
 type controlServer struct {
-	cfg              *config
-	mu               sync.RWMutex
-	jobs             map[string]*Snapshot
-	taskManifests    map[string]*SnapshotManifest
-	taskChunkIndexes map[string]map[string]chunkLocation
-	busy             bool
-	session          *finalSyncSession
-	dataRoot         string
+	cfg                    *config
+	mu                     sync.RWMutex
+	jobs                   map[string]*Snapshot
+	taskManifests          map[string]*SnapshotManifest
+	taskChunkIndexes       map[string]map[string]chunkLocation
+	busy                   bool
+	primaryRecoveryPending bool
+	session                *finalSyncSession
+	dataRoot               string
 }
 
 func (s *controlServer) root() string {
