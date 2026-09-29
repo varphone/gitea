@@ -19,6 +19,13 @@ import (
 
 func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapshot, cfg *config) error {
 	root := filepath.Clean(setting.AppWorkPath)
+	stageInfo, err := os.Lstat(stage)
+	if err != nil {
+		return fmt.Errorf("stat install stage: %w", err)
+	}
+	if !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("install stage must be a real directory")
+	}
 	localConfig, err := os.ReadFile(setting.CustomConf)
 	if err != nil {
 		return fmt.Errorf("read standby configuration: %w", err)

@@ -13,6 +13,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -27,6 +28,7 @@ const (
 	chunkMinSize             = 256 << 10
 	chunkAverageSize         = 1 << 20
 	chunkMaxSize             = 4 << 20
+	maxManifestSymlinkDepth  = 40
 	maxManifestSize          = 256 << 20
 )
 
@@ -157,6 +159,65 @@ func validateTreeLink(rel, target string) error {
 	return nil
 }
 
+func validateTreeTopology(entries []TreeEntry) error {
+	entryDirectories := make(map[string]bool, len(entries))
+	symlinkTargets := make(map[string]string)
+	for _, entry := range entries {
+		if err := validateTreePath(entry.Path); err != nil {
+			return err
+		}
+		if _, ok := entryDirectories[entry.Path]; ok {
+			return fmt.Errorf("duplicate manifest path %q", entry.Path)
+		}
+		entryDirectories[entry.Path] = entry.Type == "dir"
+		if entry.Type == "symlink" {
+			symlinkTargets[entry.Path] = entry.LinkTarget
+		}
+	}
+	for _, entry := range entries {
+		parent := path.Dir(entry.Path)
+		if parent != "." {
+			isDirectory, ok := entryDirectories[parent]
+			if !ok || !isDirectory {
+				return fmt.Errorf("manifest parent %q for %q is not a directory", parent, entry.Path)
+			}
+		}
+		if entry.Type != "symlink" {
+			continue
+		}
+		parts := []string{}
+		if parent != "." {
+			parts = strings.Split(parent, "/")
+		}
+		pending := strings.Split(filepath.ToSlash(entry.LinkTarget), "/")
+		followed := 1
+		for len(pending) > 0 {
+			part := pending[0]
+			pending = pending[1:]
+			switch part {
+			case "", ".":
+				continue
+			case "..":
+				if len(parts) == 0 {
+					return fmt.Errorf("unsafe symlink target %q", entry.LinkTarget)
+				}
+				parts = parts[:len(parts)-1]
+			default:
+				parts = append(parts, part)
+				if target, ok := symlinkTargets[strings.Join(parts, "/")]; ok {
+					followed++
+					if followed > maxManifestSymlinkDepth {
+						return fmt.Errorf("symlink target %q traverses too many links", entry.LinkTarget)
+					}
+					parts = parts[:len(parts)-1]
+					pending = append(strings.Split(filepath.ToSlash(target), "/"), pending...)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func scanIncrementalTree(ctx context.Context, root string) (*SnapshotManifest, error) {
 	return scanIncrementalTreeWithOptions(ctx, root, nil, true)
 }
@@ -240,6 +301,9 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := validateTreeTopology(m.Files); err != nil {
 		return nil, err
 	}
 	if verifyAll {
@@ -331,15 +395,7 @@ func validateIncrementalManifest(m *SnapshotManifest) error {
 		return errors.New("invalid incremental manifest state")
 	}
 	var logicalSize int64
-	seen := make(map[string]struct{}, len(m.Files))
 	for _, e := range m.Files {
-		if err := validateTreePath(e.Path); err != nil {
-			return err
-		}
-		if _, ok := seen[e.Path]; ok {
-			return fmt.Errorf("duplicate manifest path %q", e.Path)
-		}
-		seen[e.Path] = struct{}{}
 		if e.Mode > 0o777 || len(e.ChangeID) > 128 {
 			return fmt.Errorf("invalid metadata in %q", e.Path)
 		}
@@ -383,6 +439,9 @@ func validateIncrementalManifest(m *SnapshotManifest) error {
 		default:
 			return fmt.Errorf("invalid entry type %q", e.Type)
 		}
+	}
+	if err := validateTreeTopology(m.Files); err != nil {
+		return err
 	}
 	if logicalSize != m.Size {
 		return errors.New("manifest logical size mismatch")

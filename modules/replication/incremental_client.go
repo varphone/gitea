@@ -656,6 +656,13 @@ func fileMatchesManifestChunks(ctx context.Context, path string, entry TreeEntry
 }
 
 func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, manifest, previous *SnapshotManifest, fetch func(string) ([]byte, error)) error {
+	stageInfo, err := os.Lstat(stage)
+	if err != nil {
+		return err
+	}
+	if !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("incremental staging path must be a real directory")
+	}
 	oldEntries := map[string]TreeEntry{}
 	oldChunks := map[string]chunkLocation{}
 	verifyLocal := previous != nil && !manifest.FullScanAt.IsZero() && manifest.FullScanAt.After(previous.FullScanAt)
@@ -806,7 +813,7 @@ func prepareIncrementalStage(cfg *config, final *SnapshotManifest, stage string)
 	if data, err := os.ReadFile(checkpointPath); err == nil {
 		var checkpoint stageCheckpoint
 		if json.Unmarshal(data, &checkpoint) == nil && checkpoint.SnapshotID == final.ID && checkpoint.ManifestSHA == final.SHA256 {
-			if info, err := os.Stat(stage); err == nil && info.IsDir() {
+			if info, err := os.Lstat(stage); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 				return true, nil
 			}
 		}
