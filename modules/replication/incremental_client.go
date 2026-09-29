@@ -218,6 +218,7 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 	}
 	operation := "create sync job " + request.Kind
 	busyWaits := 0
+	busyStarted := time.Time{}
 	for attempt := 1; ; attempt++ {
 		resp, err := doRetryableJSONRequest(ctx, client, http.MethodPost, base+syncJobsPath, token, operation, payload)
 		if err != nil {
@@ -236,9 +237,12 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 			statusErr := responseStatusError(endpoint, resp)
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusConflict && strings.Contains(statusErr.Error(), "sync already in progress") {
+				if busyWaits == 0 {
+					busyStarted = time.Now()
+				}
 				busyWaits++
 				if busyWaits == 1 || busyWaits%30 == 0 {
-					log.Info("Primary replication is busy; waiting to create %s job (%d waits)", request.Kind, busyWaits)
+					log.Info("Primary replication is busy; waiting to create %s job: waits=%d elapsed=%s reason=%q", request.Kind, busyWaits, time.Since(busyStarted), statusErr)
 				}
 				timer := time.NewTimer(syncBusyRetryDelay)
 				select {
@@ -356,15 +360,22 @@ func pollManifestTask(ctx context.Context, client *http.Client, base, token, id,
 		phase = "preflight"
 	}
 	log.Info("Submitted %s task %s; polling snapshot status", phase, id)
+	pollStarted := time.Now()
+	polls := 0
 	ticker := time.NewTicker(manifestPollInterval)
 	defer ticker.Stop()
 	for {
 		snapshot, err := requestSnapshotStatus(ctx, client, base, token, id)
 		if err != nil {
+			log.Error("Failed to poll %s task %s after %s: %v", phase, id, time.Since(pollStarted), err)
 			return nil, err
 		}
+		polls++
 		switch snapshot.State {
 		case snapshotStateCreating:
+			if polls%60 == 0 {
+				log.Info("%s task %s is still creating: polls=%d elapsed=%s", phase, id, polls, time.Since(pollStarted))
+			}
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -373,11 +384,13 @@ func pollManifestTask(ctx context.Context, client *http.Client, base, token, id,
 			continue
 		case "failed":
 			if snapshot.Error != "" {
+				log.Error("%s task %s failed after %s: %s", phase, id, time.Since(pollStarted), snapshot.Error)
 				return nil, fmt.Errorf("%s task %s failed: %s", phase, id, snapshot.Error)
 			}
+			log.Error("%s task %s failed after %s", phase, id, time.Since(pollStarted))
 			return nil, fmt.Errorf("%s task %s failed", phase, id)
 		case expectedState:
-			log.Info("%s task %s completed; downloading manifest", phase, id)
+			log.Info("%s task %s reached state %s after %s (%d polls); downloading manifest", phase, id, expectedState, time.Since(pollStarted), polls)
 			return requestManifestByID(ctx, client, base, token, id, expectedState)
 		default:
 			return nil, fmt.Errorf("%s task %s entered unexpected state %q", phase, id, snapshot.State)
@@ -499,7 +512,15 @@ func readCachedChunk(cacheDir, hash string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+func transferRateMiBPerSecond(size int64, duration time.Duration) float64 {
+	if duration <= 0 {
+		return 0
+	}
+	return float64(size) / duration.Seconds() / (1 << 20)
+}
+
 func fetchMissingChunks(ctx context.Context, client *http.Client, base, token string, manifest, previous *SnapshotManifest, cacheDir string, tolerateChanges bool) error {
+	passStarted := time.Now()
 	available := map[string]struct{}{}
 	if previous != nil {
 		for hash := range indexManifest(previous) {
@@ -512,24 +533,30 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 	deferred := 0
 	skipped := 0
 	processed := 0
+	var fetchedBytes, cachedCandidateBytes int64
+	lastProgressAt := time.Time{}
 	if !tolerateChanges {
 		missing := make([]string, 0, total)
+		var missingBytes int64
 		for hash, location := range manifestChunks {
 			if _, ok := available[hash]; ok || cachedChunkAvailable(cacheDir, hash, location.Size) {
 				skipped++
+				cachedCandidateBytes += location.Size
 				continue
 			}
 			missing = append(missing, hash)
+			missingBytes += location.Size
 		}
-		if err := fetchChunksConcurrently(ctx, client, base, token, manifest.ID, missing, cacheDir, total, skipped); err != nil {
+		if err := fetchChunksConcurrently(ctx, client, base, token, manifest.ID, missing, cacheDir, total, skipped, missingBytes); err != nil {
 			return err
 		}
-		log.Info("Finished final chunk pass for snapshot %s: fetched=%d cached=%d total=%d", manifest.ID, len(missing), skipped, total)
+		log.Info("Final chunk pass prepared for snapshot %s: download_chunks=%d reusable_candidates=%d total_chunks=%d reusable_candidate_bytes=%d expected_transfer_bytes=%d duration=%s", manifest.ID, len(missing), skipped, total, cachedCandidateBytes, missingBytes, time.Since(passStarted))
 		return nil
 	}
 	for hash, location := range manifestChunks {
 		if _, ok := available[hash]; ok || cachedChunkAvailable(cacheDir, hash, location.Size) {
 			skipped++
+			cachedCandidateBytes += location.Size
 			processed++
 			continue
 		}
@@ -552,19 +579,25 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 			}
 		}
 		if err != nil {
+			log.Error("Preflight chunk fetch failed: snapshot=%s hash=%s fetched=%d cached_candidates=%d deferred=%d duration=%s error=%v", manifest.ID, hash, fetched, skipped, deferred, time.Since(passStarted), err)
 			return err
 		}
 		if err := storeChunk(cacheDir, hash, data); err != nil {
+			log.Error("Preflight chunk cache write failed: snapshot=%s hash=%s bytes=%d error=%v", manifest.ID, hash, len(data), err)
 			return err
 		}
 		fetched++
+		fetchedBytes += int64(len(data))
 		processed++
-		if fetched == 1 || fetched%chunkProgressLogStride == 0 {
+		now := time.Now()
+		if lastProgressAt.IsZero() || now.Sub(lastProgressAt) >= 30*time.Second {
 			phase := "final"
 			if tolerateChanges {
 				phase = "preflight"
 			}
-			log.Info("Fetched %d/%d %s chunks for snapshot %s (cached=%d deferred=%d)", fetched, total, phase, manifest.ID, skipped, deferred)
+			elapsed := time.Since(passStarted)
+			log.Info("Fetched %d/%d %s chunks for snapshot %s: downloaded_bytes=%d reusable_candidate_bytes=%d average_mib_per_sec=%.2f cached=%d deferred=%d elapsed=%s", fetched, total, phase, manifest.ID, fetchedBytes, cachedCandidateBytes, transferRateMiBPerSecond(fetchedBytes, elapsed), skipped, deferred, elapsed)
+			lastProgressAt = now
 		}
 	}
 	phase := "final"
@@ -572,16 +605,18 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 		phase = "preflight"
 	}
 	if tolerateChanges && fetched == 0 && deferred > 0 {
-		log.Warn("Finished %s chunk pass for snapshot %s without caching any chunks; source changed before every fetch (cached=%d deferred=%d total=%d)", phase, manifest.ID, skipped, deferred, total)
+		log.Warn("Finished %s chunk pass for snapshot %s without caching any chunks; source changed before every fetch (cached=%d deferred=%d total=%d elapsed=%s)", phase, manifest.ID, skipped, deferred, total, time.Since(passStarted))
 	}
-	log.Info("Finished %s chunk pass for snapshot %s: fetched=%d cached=%d deferred=%d total=%d", phase, manifest.ID, fetched, skipped, deferred, total)
+	elapsed := time.Since(passStarted)
+	log.Info("Finished %s chunk pass for snapshot %s: fetched=%d downloaded_bytes=%d reusable_candidates=%d reusable_candidate_bytes=%d average_mib_per_sec=%.2f deferred=%d total=%d duration=%s", phase, manifest.ID, fetched, fetchedBytes, skipped, cachedCandidateBytes, transferRateMiBPerSecond(fetchedBytes, elapsed), deferred, total, elapsed)
 	return nil
 }
 
-func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, token, id string, hashes []string, cacheDir string, total, cached int) error {
+func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, token, id string, hashes []string, cacheDir string, total, cached int, totalBytes int64) error {
 	if len(hashes) == 0 {
 		return nil
 	}
+	started := time.Now()
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jobs := make(chan string)
@@ -590,6 +625,8 @@ func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, tok
 	var firstErr error
 	var firstErrOnce sync.Once
 	var fetched atomic.Int64
+	var fetchedBytes atomic.Int64
+	var lastProgress atomic.Int64
 	workers.Add(workerCount)
 	for range workerCount {
 		go func() {
@@ -607,8 +644,18 @@ func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, tok
 					return
 				}
 				count := fetched.Add(1)
-				if count == 1 || count%chunkProgressLogStride == 0 {
-					log.Info("Fetched %d/%d final chunks for snapshot %s (cached=%d)", count, total, id, cached)
+				bytes := fetchedBytes.Add(int64(len(data)))
+				now := time.Now()
+				logProgress := false
+				if last := lastProgress.Load(); last == 0 {
+					logProgress = lastProgress.CompareAndSwap(0, now.UnixNano())
+				} else if now.Sub(time.Unix(0, last)) >= 30*time.Second && lastProgress.CompareAndSwap(last, now.UnixNano()) {
+					logProgress = true
+				}
+				if logProgress {
+					elapsed := time.Since(started)
+					rate := transferRateMiBPerSecond(bytes, elapsed)
+					log.Info("Final chunk transfer progress: snapshot=%s fetched_chunks=%d total_chunks=%d downloaded_bytes=%d/%d average_mib_per_sec=%.2f cached_candidates=%d elapsed=%s", id, count, total, bytes, totalBytes, rate, cached, elapsed)
 				}
 			}
 		}()
@@ -623,10 +670,19 @@ sendJobs:
 	}
 	close(jobs)
 	workers.Wait()
+	elapsed := time.Since(started)
+	bytes := fetchedBytes.Load()
 	if firstErr != nil {
+		log.Error("Final chunk transfer failed: snapshot=%s fetched=%d/%d bytes=%d/%d elapsed=%s error=%v", id, fetched.Load(), len(hashes), bytes, totalBytes, elapsed, firstErr)
 		return firstErr
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		log.Error("Final chunk transfer canceled: snapshot=%s fetched=%d/%d bytes=%d/%d elapsed=%s error=%v", id, fetched.Load(), len(hashes), bytes, totalBytes, elapsed, err)
+		return err
+	}
+	rate := transferRateMiBPerSecond(bytes, elapsed)
+	log.Info("Final chunk transfer completed: snapshot=%s fetched=%d/%d bytes=%d/%d average_mib_per_sec=%.2f cached_candidates=%d elapsed=%s", id, fetched.Load(), len(hashes), bytes, totalBytes, rate, cached, elapsed)
+	return nil
 }
 
 func sameFile(a, b TreeEntry) bool {
@@ -911,6 +967,7 @@ func preserveFinalSession(err error) bool {
 }
 
 func completeFinalSync(ctx context.Context, cfg *config, base string, client *http.Client, final, previous *SnapshotManifest, cacheDir, stage string) error {
+	syncStarted := time.Now()
 	completed := false
 	abortSession := true
 	defer func() {
@@ -921,48 +978,66 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 			cancel()
 		}
 	}()
+	chunkPassStarted := time.Now()
 	if err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, final, previous, cacheDir, false); err != nil {
+		log.Error("Final chunk preparation failed: snapshot=%s duration=%s error=%v", final.ID, time.Since(chunkPassStarted), err)
 		if preserveFinalSession(err) {
 			abortSession = false
 			log.Warn("Final sync session %s is retained for retry after transient transport failure: %v", final.ID, err)
 		}
 		return err
 	}
+	log.Info("Final chunk preparation completed: snapshot=%s duration=%s", final.ID, time.Since(chunkPassStarted))
 	resumedStage, err := prepareIncrementalStage(cfg, final, stage)
 	if err != nil {
+		log.Error("Cannot prepare incremental stage: snapshot=%s stage=%s error=%v", final.ID, stage, err)
 		return err
 	}
 	if resumedStage {
 		log.Info("Resuming prepared staging tree for snapshot %s", final.ID)
 	}
 	root := filepath.Clean(setting.AppWorkPath)
+	stageStarted := time.Now()
 	fetch := func(hash string) ([]byte, error) {
-		return requestChunk(ctx, client, base, cfg.ControlToken, final.ID, hash)
+		started := time.Now()
+		data, err := requestChunk(ctx, client, base, cfg.ControlToken, final.ID, hash)
+		if err != nil {
+			log.Warn("On-demand final chunk fetch failed: snapshot=%s hash=%s duration=%s error=%v", final.ID, hash, time.Since(started), err)
+			return nil, err
+		}
+		log.Debug("Fetched on-demand final chunk: snapshot=%s hash=%s bytes=%d duration=%s", final.ID, hash, len(data), time.Since(started))
+		return data, nil
 	}
 	if err := buildIncrementalStage(ctx, root, stage, cacheDir, final, previous, fetch); err != nil {
+		log.Error("Incremental stage build failed: snapshot=%s duration=%s error=%v", final.ID, time.Since(stageStarted), err)
 		if preserveFinalSession(err) {
 			abortSession = false
 			log.Warn("Final sync session %s is retained for retry after transient transport failure: %v", final.ID, err)
 		}
 		return err
 	}
-	log.Info("Prepared incremental stage for snapshot %s", final.ID)
+	log.Info("Prepared incremental stage: snapshot=%s duration=%s", final.ID, time.Since(stageStarted))
 	log.Info("Activating incremental stage for snapshot %s on the standby", final.ID)
+	activationStarted := time.Now()
 	if err := installPreparedSnapshot(ctx, stage, &final.Snapshot, cfg); err != nil {
 		var warning *cleanupWarning
 		if !errors.As(err, &warning) {
+			log.Error("Standby activation failed: snapshot=%s duration=%s error=%v", final.ID, time.Since(activationStarted), err)
 			return err
 		}
 		log.Warn("%v", warning)
 	}
-	log.Info("Standby activation completed for snapshot %s; marking remote session complete", final.ID)
+	log.Info("Standby activation completed: snapshot=%s duration=%s; marking remote session complete", final.ID, time.Since(activationStarted))
+	remoteFinishStarted := time.Now()
 	if err := finishRemoteSession(ctx, client, base, cfg.ControlToken, final.ID, "complete"); err != nil {
+		log.Error("Remote final sync completion failed: snapshot=%s duration=%s error=%v", final.ID, time.Since(remoteFinishStarted), err)
 		if preserveFinalSession(err) {
 			abortSession = false
 			log.Warn("Final sync session %s is retained for retry after transient transport failure: %v", final.ID, err)
 		}
 		return err
 	}
+	log.Info("Remote final sync session completed: snapshot=%s duration=%s", final.ID, time.Since(remoteFinishStarted))
 	completed = true
 	if err := os.Remove(stageCheckpointPath(cfg)); err != nil && !os.IsNotExist(err) {
 		log.Warn("Remove completed staging checkpoint: %v", err)
@@ -981,7 +1056,7 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 	if err := os.RemoveAll(cacheDir); err != nil {
 		log.Warn("Remove incremental cache: %v", err)
 	}
-	log.Info("Standby restore completed successfully with snapshot %s", final.ID)
+	log.Info("Standby restore completed successfully: snapshot=%s total_duration=%s", final.ID, time.Since(syncStarted))
 	return nil
 }
 
@@ -1059,7 +1134,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 			}
 		}
 		if preflight == nil {
-			log.Info("Requesting preflight manifest from %s", base)
+			log.Info("Requesting preflight manifest from %s", redactedEndpointLabel(base))
 			preflight, err = requestManifest(ctx, client, base, cfg.ControlToken, "preflight")
 			if err != nil {
 				return err

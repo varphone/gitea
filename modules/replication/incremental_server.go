@@ -83,9 +83,10 @@ func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
 		if err == nil {
 			if manifest.FullScanAt.IsZero() ||
 				(s.cfg.FullScanInterval > 0 && !now.Before(manifest.FullScanAt.Add(s.cfg.FullScanInterval))) {
-				log.Info("Run a full disaster-recovery scan; the verification interval has elapsed")
+				log.Info("Run full disaster-recovery verification from baseline %s: last_full_scan=%s interval=%s", manifest.ID, manifest.FullScanAt, s.cfg.FullScanInterval)
 				return manifest, true
 			}
+			log.Info("Run incremental disaster-recovery preflight from ready baseline %s: last_full_scan=%s", manifest.ID, manifest.FullScanAt)
 			return manifest, false
 		}
 		if fallback != nil {
@@ -100,7 +101,7 @@ func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
 	if fallback != nil {
 		if fallback.FullScanAt.IsZero() ||
 			(s.cfg.FullScanInterval > 0 && !now.Before(fallback.FullScanAt.Add(s.cfg.FullScanInterval))) {
-			log.Info("Run a full disaster-recovery scan; the verification interval has elapsed")
+			log.Info("Run full disaster-recovery verification from fallback %s in state %s: last_full_scan=%s interval=%s", fallback.ID, fallback.State, fallback.FullScanAt, s.cfg.FullScanInterval)
 			return fallback, true
 		}
 		log.Info("Reuse authenticated disaster-recovery manifest %s in state %s as the preflight base", fallback.ID, fallback.State)
@@ -112,11 +113,14 @@ func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
 
 func (s *controlServer) startPrimary() error {
 	if err := systemctlWithTimeout(s.cfg.ServiceTimeout, "start", s.cfg.GiteaServiceName); err != nil {
-		return err
+		return fmt.Errorf("start primary service %s: %w", s.cfg.GiteaServiceName, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ServiceTimeout)
 	defer cancel()
-	return readinessCheck(ctx, s.cfg.GiteaServiceName)
+	if err := readinessCheck(ctx, s.cfg.GiteaServiceName); err != nil {
+		return fmt.Errorf("wait for primary service %s readiness: %w", s.cfg.GiteaServiceName, err)
+	}
+	return nil
 }
 
 func (s *controlServer) retryPrimaryStart() {
@@ -132,15 +136,24 @@ func (s *controlServer) retryPrimaryStart() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.SnapshotTimeout)
 		defer cancel()
+		attempt := 0
+		lastFailureLog := time.Time{}
 		for {
+			attempt++
+			started := time.Now()
 			if err := s.startPrimary(); err == nil {
 				s.mu.Lock()
 				s.primaryRecoveryPending = false
 				s.mu.Unlock()
-				log.Info("Recovered primary Gitea after incremental sync failure")
+				log.Info("Recovered primary Gitea after incremental sync failure: attempt=%d duration=%s", attempt, time.Since(started))
 				return
 			} else {
-				log.Error("Failed to recover primary Gitea after incremental sync: %v", err)
+				if lastFailureLog.IsZero() || time.Since(lastFailureLog) >= time.Minute {
+					log.Error("Failed to recover primary Gitea after incremental sync: attempt=%d duration=%s error=%v", attempt, time.Since(started), err)
+					lastFailureLog = time.Now()
+				} else {
+					log.Debug("Primary Gitea recovery attempt failed: attempt=%d duration=%s error=%v", attempt, time.Since(started), err)
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -153,10 +166,13 @@ func (s *controlServer) retryPrimaryStart() {
 }
 
 func (s *controlServer) recoverPrimary() {
+	started := time.Now()
 	if err := s.startPrimary(); err != nil {
-		log.Error("Failed to restart primary Gitea: %v", err)
+		log.Error("Failed to restart primary Gitea after %s: %v", time.Since(started), err)
 		s.retryPrimaryStart()
+		return
 	}
+	log.Info("Restarted primary Gitea after replication failure: duration=%s", time.Since(started))
 }
 
 func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
@@ -170,10 +186,10 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		w.Header().Set("Retry-After", "1")
 		if recoveryPending {
-			log.Info("Preflight request deferred: primary Gitea recovery is pending")
+			log.Debug("Preflight request deferred: primary Gitea recovery is pending")
 			http.Error(w, "sync already in progress: primary Gitea recovery is pending", http.StatusConflict)
 		} else {
-			log.Info("Preflight request deferred: sync already in progress")
+			log.Debug("Preflight request deferred: sync already in progress")
 			http.Error(w, "sync already in progress", http.StatusConflict)
 		}
 		return
@@ -211,15 +227,30 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *controlServer) runPreflightTask(id string) {
+	taskStarted := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.SnapshotTimeout)
 	defer cancel()
 	base, verifyAll := s.preflightPlan(time.Now().UTC())
+	scanMode, baseID := "incremental", "none"
+	if verifyAll {
+		scanMode = "full verification"
+	}
+	if base != nil {
+		baseID = base.ID
+	}
+	log.Info("Preflight task %s scanning %s snapshot: base=%s", id, scanMode, baseID)
+	scanStarted := time.Now()
 	var manifest *SnapshotManifest
 	var err error
 	for attempt := 0; attempt < 5; attempt++ {
 		manifest, err = scanIncrementalTreeWithOptions(ctx, s.root(), base, verifyAll)
 		if err == nil || !strings.Contains(err.Error(), "changed while scanning") {
 			break
+		}
+		if attempt == 4 {
+			log.Warn("Preflight task %s scan still found changing files on final attempt=%d/5: %v", id, attempt+1, err)
+		} else {
+			log.Warn("Preflight task %s scan found changing files; retrying attempt=%d/5 error=%v", id, attempt+1, err)
 		}
 		select {
 		case <-ctx.Done():
@@ -229,26 +260,27 @@ func (s *controlServer) runPreflightTask(id string) {
 		}
 	}
 	if err != nil {
-		log.Error("Preflight task %s failed: %v", id, err)
+		log.Error("Preflight task %s failed after %s: %v", id, time.Since(taskStarted), err)
 		s.failAsyncJob(id, err)
 		return
 	}
+	scanDuration := time.Since(scanStarted)
 	manifest.ID = id
 	manifest.State = "preflight"
 	manifest.CreatedAt = time.Now().UTC()
 	manifest.InstanceFingerprint = instanceFingerprint(s.cfg.ControlToken)
 	if err := signIncrementalManifest(manifest, s.cfg.ControlToken); err != nil {
-		log.Error("Preflight task %s signing failed: %v", id, err)
+		log.Error("Preflight task %s signing failed after %s: %v", id, time.Since(taskStarted), err)
 		s.failAsyncJob(id, err)
 		return
 	}
 	if err := writeManifest(s.cfg.SnapshotDir, manifest); err != nil {
-		log.Error("Preflight task %s persist failed: %v", id, err)
+		log.Error("Preflight task %s persist failed after %s: %v", id, time.Since(taskStarted), err)
 		s.failAsyncJob(id, err)
 		return
 	}
 	s.setTaskManifest(manifest)
-	log.Info("Preflight task %s completed", id)
+	log.Info("Preflight task %s completed: mode=%s base=%s files=%d bytes=%d scan_duration=%s total_duration=%s", id, scanMode, baseID, manifest.FileCount, manifest.Size, scanDuration, time.Since(taskStarted))
 	s.completeAsyncJob(id, manifest.Snapshot)
 	s.prune()
 }
@@ -264,10 +296,10 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		w.Header().Set("Retry-After", "1")
 		if recoveryPending {
-			log.Info("Finalize request deferred: primary Gitea recovery is pending")
+			log.Debug("Finalize request deferred: primary Gitea recovery is pending")
 			http.Error(w, "sync already in progress: primary Gitea recovery is pending", http.StatusConflict)
 		} else {
-			log.Info("Finalize request deferred: sync already in progress")
+			log.Debug("Finalize request deferred: sync already in progress")
 			http.Error(w, "sync already in progress", http.StatusConflict)
 		}
 		return
@@ -299,18 +331,21 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *controlServer) runFinalizeTask(id, baseID string) {
+	taskStarted := time.Now()
 	base := s.getTaskManifest(baseID)
 	if base == nil || base.State != "preflight" {
 		var err error
 		base, err = loadTrustedManifest(manifestPath(s.cfg.SnapshotDir, baseID), s.cfg.ControlToken, "preflight")
 		if err != nil {
-			log.Error("Finalize task %s cannot load preflight base %s: %v", id, baseID, err)
+			log.Error("Finalize task %s cannot load preflight base %s after %s: %v", id, baseID, time.Since(taskStarted), err)
 			s.failAsyncJob(id, fmt.Errorf("preflight base is unavailable or invalid: %w", err))
 			return
 		}
 	}
+	log.Info("Finalize task %s starting from preflight %s: base_files=%d", id, baseID, base.FileCount)
 
 	scanCtx, scanCancel := context.WithTimeout(context.Background(), s.cfg.SnapshotTimeout)
+	fenceStarted := time.Now()
 	fence, err := acquireSnapshotFence(scanCtx)
 	if err == nil {
 		err = ensureSocketActivationDisabled(scanCtx, s.cfg.GiteaServiceName)
@@ -320,12 +355,15 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 			_ = fence.Release()
 		}
 		scanCancel()
-		log.Error("Finalize task %s failed before stopping primary: %v", id, err)
+		log.Error("Finalize task %s failed before stopping primary after %s: %v", id, time.Since(fenceStarted), err)
 		s.failAsyncJob(id, err)
 		return
 	}
+	log.Info("Finalize task %s acquired snapshot fence after %s", id, time.Since(fenceStarted))
 	scanCancel()
 	outageCtx, outageCancel := context.WithTimeout(context.Background(), s.finalSessionTimeout())
+	outageStarted := time.Now()
+	stopStarted := time.Now()
 	stopAttempted := true
 	if err = systemctl(outageCtx, "stop", s.cfg.GiteaServiceName); err != nil {
 		if stopAttempted {
@@ -333,20 +371,23 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 		}
 		_ = fence.Release()
 		outageCancel()
-		log.Error("Finalize task %s failed while stopping primary: %v", id, err)
+		log.Error("Finalize task %s failed while stopping primary after %s: %v", id, time.Since(stopStarted), err)
 		s.failAsyncJob(id, err)
 		return
 	}
 
+	log.Info("Finalize task %s stopped primary after %s", id, time.Since(stopStarted))
+	finalScanStarted := time.Now()
 	manifest, err := scanIncrementalTreeWithBase(outageCtx, s.root(), base)
 	if err != nil {
 		s.recoverPrimary()
 		_ = fence.Release()
 		outageCancel()
-		log.Error("Finalize task %s final scan failed within primary outage budget: %v", id, err)
+		log.Error("Finalize task %s final scan failed: scan_duration=%s primary_outage=%s error=%v", id, time.Since(finalScanStarted), time.Since(outageStarted), err)
 		s.failAsyncJob(id, err)
 		return
 	}
+	log.Info("Finalize task %s final scan completed: files=%d bytes=%d scan_duration=%s primary_outage=%s", id, manifest.FileCount, manifest.Size, time.Since(finalScanStarted), time.Since(outageStarted))
 	manifest.ID = id
 	manifest.State = "transferring"
 	manifest.CreatedAt = time.Now().UTC()
@@ -355,7 +396,7 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 		s.recoverPrimary()
 		_ = fence.Release()
 		outageCancel()
-		log.Error("Finalize task %s signing failed: %v", id, err)
+		log.Error("Finalize task %s signing failed: primary_outage=%s total_duration=%s error=%v", id, time.Since(outageStarted), time.Since(taskStarted), err)
 		s.failAsyncJob(id, err)
 		return
 	}
@@ -363,7 +404,7 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 		s.recoverPrimary()
 		_ = fence.Release()
 		outageCancel()
-		log.Error("Finalize task %s persist failed: %v", id, err)
+		log.Error("Finalize task %s persist failed: primary_outage=%s total_duration=%s error=%v", id, time.Since(outageStarted), time.Since(taskStarted), err)
 		s.failAsyncJob(id, err)
 		return
 	}
@@ -380,7 +421,7 @@ func (s *controlServer) runFinalizeTask(id, baseID string) {
 	*job = manifest.Snapshot
 	s.busy = false
 	s.mu.Unlock()
-	log.Info("Finalize task %s completed with transferring manifest %s", id, manifest.ID)
+	log.Info("Finalize task %s prepared transfer session %s: primary_outage=%s remaining_budget=%s total_duration=%s", id, manifest.ID, time.Since(outageStarted), time.Until(deadline), time.Since(taskStarted))
 	go s.expireSession(session)
 }
 
@@ -429,9 +470,15 @@ func (s *controlServer) expireSession(session *finalSyncSession) {
 }
 
 func (s *controlServer) finishSession(id string, success bool) error {
+	finishStarted := time.Now()
+	requestedAction := "complete"
+	if !success {
+		requestedAction = "abort"
+	}
 	s.mu.Lock()
 	if s.session == nil || s.session.id != id {
 		s.mu.Unlock()
+		log.Info("Final sync session %s ignored %s request: no active session", id, requestedAction)
 		return errors.New("sync session is not active")
 	}
 	session := s.session
@@ -439,11 +486,17 @@ func (s *controlServer) finishSession(id string, success bool) error {
 	s.busy = true
 	job := s.jobs[id]
 	s.mu.Unlock()
+	log.Info("Final sync session %s finalizing: action=%s", id, requestedAction)
+	primaryStartStarted := time.Now()
 	startErr := s.startPrimary()
+	primaryStartDuration := time.Since(primaryStartStarted)
 	if startErr != nil {
+		log.Error("Final sync session %s could not restart primary Gitea after %s: %v", id, primaryStartDuration, startErr)
 		s.retryPrimaryStart()
 	}
+	fenceReleaseStarted := time.Now()
 	releaseErr := session.fence.Release()
+	fenceReleaseDuration := time.Since(fenceReleaseStarted)
 	finishErr := errors.Join(startErr, releaseErr)
 	if job != nil {
 		s.mu.Lock()
@@ -483,6 +536,11 @@ func (s *controlServer) finishSession(id string, success bool) error {
 	s.mu.Lock()
 	s.busy = false
 	s.mu.Unlock()
+	if finishErr != nil {
+		log.Error("Final sync session %s finalized with errors: action=%s duration=%s primary_start=%s fence_release=%s error=%v", id, requestedAction, time.Since(finishStarted), primaryStartDuration, fenceReleaseDuration, finishErr)
+	} else {
+		log.Info("Final sync session %s finalized: action=%s duration=%s primary_start=%s fence_release=%s", id, requestedAction, time.Since(finishStarted), primaryStartDuration, fenceReleaseDuration)
+	}
 	return finishErr
 }
 
@@ -517,9 +575,11 @@ func (s *controlServer) syncSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 		data, err := readChunk(s.root(), location, value)
 		if err != nil {
+			log.Warn("Failed to serve replication chunk: snapshot=%s hash=%s error=%v", id, value, err)
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+		log.Debug("Served replication chunk: snapshot=%s hash=%s bytes=%d", id, value, len(data))
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		_, _ = w.Write(data)

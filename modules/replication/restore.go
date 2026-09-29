@@ -116,6 +116,14 @@ func localControlBase(listen string) (string, error) {
 	return "http://" + net.JoinHostPort(host, port), nil
 }
 
+func redactedEndpointLabel(raw string) string {
+	endpoint, err := url.Parse(raw)
+	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+		return "configured control endpoint"
+	}
+	return endpoint.Scheme + "://" + endpoint.Host
+}
+
 func EnsurePrimaryService(ctx context.Context) error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -202,7 +210,7 @@ func newReplicateHTTPClient(cfg *config) (*http.Client, error) {
 			return nil, fmt.Errorf("parse CONTROL_PROXY_URL: %w", err)
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
-		log.Info("Replication control traffic will use proxy %s", proxyURL.Redacted())
+		log.Info("Replication control traffic will use proxy %s", redactedEndpointLabel(proxyURL.String()))
 	}
 	return &http.Client{Timeout: 0, Transport: transport}, nil
 }

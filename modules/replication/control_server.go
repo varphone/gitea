@@ -138,6 +138,7 @@ func ServeControl(ctx context.Context) error {
 		log.Warn("Recovering primary Gitea after interrupted final replication session")
 		s.recoverPrimary()
 	}
+	log.Info("Starting replication control plane: mode=%s listen=%s snapshot_dir=%s persisted_jobs=%d", cfg.Mode, cfg.ControlListen, cfg.SnapshotDir, len(jobs))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/replication/health", s.auth(s.health))
 	mux.HandleFunc(syncJobsPath, s.auth(s.syncTasks))

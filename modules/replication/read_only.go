@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"gitea.dev/modules/log"
 	"gitea.dev/modules/setting"
 )
 
@@ -29,6 +30,7 @@ var replicaStateChangingRoutes = [...]string{
 }
 
 func writeReplicaReadOnlyResponse(w http.ResponseWriter, request *http.Request) {
+	log.Warn("Rejected replica request while read-only: method=%s path=%s remote=%s", request.Method, request.URL.EscapedPath(), request.RemoteAddr)
 	if !strings.Contains(request.Header.Get("Accept"), "text/html") {
 		http.Error(w, replicaReadOnlyMessage, http.StatusServiceUnavailable)
 		return

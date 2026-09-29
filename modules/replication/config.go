@@ -55,7 +55,7 @@ func loadConfig() (*config, error) {
 	sec, err := setting.CfgProvider.GetSection("replicate")
 	if err != nil {
 		// Section doesn't exist — that's OK if not enabled, use defaults
-		log.Warn("No [replicate] section found in configuration, using defaults")
+		log.Debug("No [replicate] section found in configuration; replication is disabled")
 		return cfg, nil
 	}
 	if err := sec.MapTo(cfg); err != nil {
