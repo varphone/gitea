@@ -17,6 +17,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"gitea.dev/modules/json"
@@ -32,6 +34,7 @@ const (
 	chunkChangeWarnBurst   = 8
 	manifestPollInterval   = time.Second
 	chunkChangeStopStride  = 256
+	finalChunkFetchWorkers = 8
 	statusBodyPreviewLimit = 4 << 10
 )
 
@@ -489,6 +492,12 @@ func cacheHas(cacheDir, hash string) bool {
 	return verifyFile(cachePath(cacheDir, hash), hash) == nil
 }
 
+// Defer cache hashing until stage assembly to avoid reading chunks twice.
+func cachedChunkAvailable(cacheDir, hash string, size int64) bool {
+	info, err := os.Lstat(cachePath(cacheDir, hash))
+	return err == nil && info.Mode().IsRegular() && info.Size() == size
+}
+
 func readCachedChunk(cacheDir, hash string) ([]byte, error) {
 	path := cachePath(cacheDir, hash)
 	if err := verifyFile(path, hash); err != nil {
@@ -510,8 +519,23 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 	deferred := 0
 	skipped := 0
 	processed := 0
-	for hash := range manifestChunks {
-		if _, ok := available[hash]; ok || cacheHas(cacheDir, hash) {
+	if !tolerateChanges {
+		missing := make([]string, 0, total)
+		for hash, location := range manifestChunks {
+			if _, ok := available[hash]; ok || cachedChunkAvailable(cacheDir, hash, location.Size) {
+				skipped++
+				continue
+			}
+			missing = append(missing, hash)
+		}
+		if err := fetchChunksConcurrently(ctx, client, base, token, manifest.ID, missing, cacheDir, total, skipped); err != nil {
+			return err
+		}
+		log.Info("Finished final chunk pass for snapshot %s: fetched=%d cached=%d total=%d", manifest.ID, len(missing), skipped, total)
+		return nil
+	}
+	for hash, location := range manifestChunks {
+		if _, ok := available[hash]; ok || cachedChunkAvailable(cacheDir, hash, location.Size) {
 			skipped++
 			processed++
 			continue
@@ -559,6 +583,57 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 	}
 	log.Info("Finished %s chunk pass for snapshot %s: fetched=%d cached=%d deferred=%d total=%d", phase, manifest.ID, fetched, skipped, deferred, total)
 	return nil
+}
+
+func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, token, id string, hashes []string, cacheDir string, total, cached int) error {
+	if len(hashes) == 0 {
+		return nil
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan string)
+	workerCount := min(finalChunkFetchWorkers, len(hashes))
+	var workers sync.WaitGroup
+	var firstErr error
+	var firstErrOnce sync.Once
+	var fetched atomic.Int64
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for hash := range jobs {
+				data, err := requestChunk(workerCtx, client, base, token, id, hash)
+				if err == nil {
+					err = storeChunk(cacheDir, hash, data)
+				}
+				if err != nil {
+					firstErrOnce.Do(func() {
+						firstErr = err
+						cancel()
+					})
+					return
+				}
+				count := fetched.Add(1)
+				if count == 1 || count%chunkProgressLogStride == 0 {
+					log.Info("Fetched %d/%d final chunks for snapshot %s (cached=%d)", count, total, id, cached)
+				}
+			}
+		}()
+	}
+sendJobs:
+	for _, hash := range hashes {
+		select {
+		case <-workerCtx.Done():
+			break sendJobs
+		case jobs <- hash:
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
 }
 
 func sameFile(a, b TreeEntry) bool {

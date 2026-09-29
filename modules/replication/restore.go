@@ -199,6 +199,8 @@ func newReplicateHTTPClient(cfg *config) (*http.Client, error) {
 	transport.ResponseHeaderTimeout = 2 * time.Minute
 	transport.ExpectContinueTimeout = time.Second
 	transport.IdleConnTimeout = 2 * time.Minute
+	transport.MaxConnsPerHost = finalChunkFetchWorkers
+	transport.MaxIdleConnsPerHost = finalChunkFetchWorkers
 	if cfg.ControlProxyURL != "" {
 		proxyURL, err := url.Parse(cfg.ControlProxyURL)
 		if err != nil {

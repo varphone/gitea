@@ -69,7 +69,21 @@ func splitFile(ctx context.Context, path string) ([]ChunkDescriptor, error) {
 		return nil, err
 	}
 	defer f.Close()
-	buffer := make([]byte, 128<<10)
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if info.Size() == 0 {
+		return nil, nil
+	}
+	bufferSize := 128 << 10
+	if info.Size() < int64(bufferSize) {
+		bufferSize = int(info.Size())
+	}
+	buffer := make([]byte, bufferSize)
 	hash := sha256.New()
 	var chunks []ChunkDescriptor
 	var rolling uint64

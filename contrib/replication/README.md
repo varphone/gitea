@@ -45,9 +45,10 @@ retries; later restore runs scan current primary metadata again.
    match the preflight manifest reuse
    their hashes without rereading their contents.
 3. Only chunks changed since preflight are transferred while the primary is
-   stopped. The standby reconstructs a durable staging tree, hard-linking
-   unchanged complete files where possible. Missing paths in the new manifest
-   are deletions and are not reconstructed.
+   stopped. The standby fetches final chunks with up to eight concurrent
+   requests, then reconstructs a durable staging tree, hard-linking unchanged
+   complete files where possible. Missing paths in the new manifest are
+   deletions and are not reconstructed.
 4. After the standby confirms the staging tree is durable, the primary starts
    Gitea, passes its health check, releases the write fence, and marks the
    signed manifest ready.
