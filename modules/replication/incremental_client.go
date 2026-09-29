@@ -1066,7 +1066,7 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 			log.Error("Standby activation failed: snapshot=%s duration=%s error=%v", final.ID, time.Since(activationStarted), err)
 			return err
 		}
-		log.Warn("%v", warning)
+		log.Warn("Standby activation completed with cleanup warning: snapshot=%s error=%v", final.ID, warning)
 	}
 	log.Info("Standby activation completed: snapshot=%s duration=%s; marking remote session complete", final.ID, time.Since(activationStarted))
 	remoteFinishStarted := time.Now()
@@ -1081,21 +1081,24 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 	log.Info("Remote final sync session completed: snapshot=%s duration=%s", final.ID, time.Since(remoteFinishStarted))
 	completed = true
 	if err := os.Remove(stageCheckpointPath(cfg)); err != nil && !os.IsNotExist(err) {
-		log.Warn("Remove completed staging checkpoint: %v", err)
+		log.Warn("Remove completed staging checkpoint: snapshot=%s error=%v", final.ID, err)
 	}
 	final.State = "ready"
 	if err := signIncrementalManifest(final, cfg.ControlToken); err != nil {
+		log.Error("Sign restored standby manifest failed: snapshot=%s error=%v", final.ID, err)
 		return err
 	}
 	if err := persistStandbyManifest(cfg.SnapshotDir, final); err != nil {
+		log.Error("Persist restored standby manifest failed: snapshot=%s error=%v", final.ID, err)
 		return err
 	}
 	if err := writeManifestAt(filepath.Join(cfg.SnapshotDir, "current.json"), final); err != nil {
+		log.Error("Persist current standby manifest failed: snapshot=%s error=%v", final.ID, err)
 		return err
 	}
 	pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention, cfg.ControlToken)
 	if err := os.RemoveAll(cacheDir); err != nil {
-		log.Warn("Remove incremental cache: %v", err)
+		log.Warn("Remove completed incremental cache: snapshot=%s error=%v", final.ID, err)
 	}
 	log.Info("Standby restore completed successfully: snapshot=%s total_duration=%s", final.ID, time.Since(syncStarted))
 	return nil

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"gitea.dev/modules/log"
 	"gitea.dev/modules/setting"
 
 	"golang.org/x/sys/unix"
@@ -66,7 +67,16 @@ func exchangeDirectories(root, stage string) error {
 }
 
 // SwitchDataRoot is invoked only by the root-owned atomic switch systemd unit.
-func SwitchDataRoot() error {
+func SwitchDataRoot() (retErr error) {
+	started := time.Now()
+	log.Info("Starting atomic standby data exchange")
+	defer func() {
+		if retErr != nil {
+			log.Error("Atomic standby data exchange failed: duration=%s error=%v", time.Since(started), retErr)
+			return
+		}
+		log.Info("Atomic standby data exchange completed: duration=%s", time.Since(started))
+	}()
 	if os.Geteuid() != 0 {
 		return errors.New("atomic data switch must run as root")
 	}

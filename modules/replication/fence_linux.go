@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"gitea.dev/modules/log"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -34,6 +36,9 @@ func AcquireSnapshotFence(ctx context.Context) (*WriteFence, error) {
 	if err != nil {
 		return nil, err
 	}
+	waitStarted := time.Now()
+	nextProgressLog := waitStarted.Add(5 * time.Second)
+	loggedWait := false
 	for {
 		err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
@@ -42,6 +47,15 @@ func AcquireSnapshotFence(ctx context.Context) (*WriteFence, error) {
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
 			_ = file.Close()
 			return nil, err
+		}
+		if now := time.Now(); !now.Before(nextProgressLog) {
+			if loggedWait {
+				log.Debug("Still waiting for active replication write leases: elapsed=%s", now.Sub(waitStarted))
+			} else {
+				log.Info("Waiting for active replication write leases to finish: elapsed=%s", now.Sub(waitStarted))
+				loggedWait = true
+			}
+			nextProgressLog = now.Add(30 * time.Second)
 		}
 		select {
 		case <-ctx.Done():

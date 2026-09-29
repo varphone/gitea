@@ -168,8 +168,10 @@ func ServeControl(ctx context.Context) error {
 	}()
 	err = server.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
+		log.Info("Replication control plane stopped")
 		return nil
 	}
+	log.Error("Replication control plane failed: %v", err)
 	return err
 }
 
@@ -399,6 +401,7 @@ func isReplicationTemporaryFile(name string) bool {
 func pruneManifestFiles(dir string, retention int, tokens ...string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		log.Warn("Cannot list replication manifest directory %s for pruning: %v", dir, err)
 		return
 	}
 	var manifests []string
@@ -410,8 +413,10 @@ func pruneManifestFiles(dir string, retention int, tokens ...string) {
 		name := entry.Name()
 		path := filepath.Join(dir, name)
 		if isReplicationTemporaryFile(name) {
-			if os.Remove(path) == nil {
+			if err := os.Remove(path); err == nil {
 				removed++
+			} else {
+				log.Warn("Cannot remove temporary replication file %s: %v", path, err)
 			}
 			continue
 		}
@@ -427,13 +432,17 @@ func pruneManifestFiles(dir string, retention int, tokens ...string) {
 	}
 	sort.Strings(manifests)
 	for len(manifests) > retention {
-		if os.Remove(manifests[0]) == nil {
+		if err := os.Remove(manifests[0]); err == nil {
 			removed++
+		} else {
+			log.Warn("Cannot prune replication manifest %s: %v", manifests[0], err)
 		}
 		manifests = manifests[1:]
 	}
 	if removed > 0 {
-		_ = syncDirectory(dir)
+		if err := syncDirectory(dir); err != nil {
+			log.Warn("Cannot persist replication manifest pruning in %s: %v", dir, err)
+		}
 		log.Info("Pruned %d replication manifest files; retained %d snapshot manifests", removed, len(manifests))
 	}
 }

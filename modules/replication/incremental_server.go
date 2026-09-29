@@ -551,6 +551,8 @@ func (s *controlServer) finishSession(id string, success bool) error {
 			} else {
 				s.setTaskManifest(manifest)
 			}
+		} else {
+			log.Warn("Cannot update finalized replication manifest %s: %v", id, err)
 		}
 	}
 	if session.cancel != nil {
@@ -645,10 +647,17 @@ func (s *controlServer) abortActiveSession() {
 }
 
 func removeLegacyArchives(dir string) {
-	files, _ := os.ReadDir(dir)
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		log.Warn("Cannot list replication snapshot directory %s for legacy archive cleanup: %v", dir, err)
+		return
+	}
 	for _, file := range files {
 		if strings.HasSuffix(file.Name(), ".tar.gz") || strings.HasSuffix(file.Name(), ".tar.gz.tmp") {
-			_ = os.Remove(filepath.Join(dir, file.Name()))
+			path := filepath.Join(dir, file.Name())
+			if err := os.Remove(path); err != nil {
+				log.Warn("Cannot remove legacy replication archive %s: %v", path, err)
+			}
 		}
 	}
 }

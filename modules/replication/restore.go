@@ -193,7 +193,14 @@ func RestoreLatest(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return restoreIncremental(ctx, cfg, incrementalBase(cfg), client)
+	base := incrementalBase(cfg)
+	started := time.Now()
+	log.Info("Starting standby replication restore: source=%s snapshot_dir=%s", redactedEndpointLabel(base), cfg.SnapshotDir)
+	if err := restoreIncremental(ctx, cfg, base, client); err != nil {
+		log.Error("Standby replication restore failed: source=%s duration=%s error=%v", redactedEndpointLabel(base), time.Since(started), err)
+		return err
+	}
+	return nil
 }
 
 func newReplicateHTTPClient(cfg *config) (*http.Client, error) {

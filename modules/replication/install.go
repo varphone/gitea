@@ -14,10 +14,13 @@ import (
 	"strings"
 	"time"
 
+	"gitea.dev/modules/log"
 	"gitea.dev/modules/setting"
 )
 
 func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapshot, cfg *config) error {
+	installStarted := time.Now()
+	log.Info("Validating standby snapshot for installation: snapshot=%s bytes=%d stage=%s", snapshot.ID, snapshot.Size, filepath.Base(stage))
 	root := filepath.Clean(setting.AppWorkPath)
 	stageInfo, err := os.Lstat(stage)
 	if err != nil {
@@ -44,7 +47,9 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	stageOwned := true
 	defer func() {
 		if stageOwned {
-			_ = os.RemoveAll(stage)
+			if err := os.RemoveAll(stage); err != nil {
+				log.Warn("Remove failed standby install stage: snapshot=%s stage=%s error=%v", snapshot.ID, filepath.Base(stage), err)
+			}
 		}
 	}()
 	if snapshot.RootMode == 0 || snapshot.RootMode > 0o777 {
@@ -53,9 +58,12 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	if err := os.Chmod(stage, os.FileMode(snapshot.RootMode)); err != nil {
 		return fmt.Errorf("restore APP_WORK_PATH mode: %w", err)
 	}
+	syncStarted := time.Now()
 	if err := syncTree(ctx, stage); err != nil {
+		log.Error("Persist extracted standby snapshot failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(syncStarted), err)
 		return fmt.Errorf("persist extracted snapshot: %w", err)
 	}
+	log.Info("Persisted extracted standby snapshot: snapshot=%s duration=%s", snapshot.ID, time.Since(syncStarted))
 	dbRel, err := filepath.Rel(root, setting.Database.Path)
 	if err != nil || dbRel == ".." || strings.HasPrefix(dbRel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("invalid restored database path %q", setting.Database.Path)
@@ -69,28 +77,44 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	if err := ensureSocketActivationDisabled(taskCtx, cfg.GiteaServiceName); err != nil {
 		return err
 	}
+	fenceStarted := time.Now()
+	log.Debug("Waiting for standby replication write fence: snapshot=%s", snapshot.ID)
 	fence, err := acquireSnapshotFence(taskCtx)
 	if err != nil {
+		log.Error("Acquire standby replication write fence failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(fenceStarted), err)
 		return fmt.Errorf("acquire standby write fence: %w", err)
 	}
-	defer func() { _ = fence.Release() }()
+	log.Info("Acquired standby replication write fence: snapshot=%s wait=%s", snapshot.ID, time.Since(fenceStarted))
+	defer func() {
+		if err := fence.Release(); err != nil {
+			log.Error("Release standby replication write fence failed: snapshot=%s error=%v", snapshot.ID, err)
+		}
+	}()
 	wasActive, err := systemctlUnitActive(taskCtx, cfg.GiteaServiceName)
 	if err != nil {
 		return err
 	}
+	stopStarted := time.Now()
 	if err := systemctl(taskCtx, "stop", cfg.GiteaServiceName); err != nil {
+		log.Error("Stop standby service failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(stopStarted), err)
 		return fmt.Errorf("stop standby gitea: %w", err)
 	}
+	log.Info("Stopped standby service for snapshot installation: snapshot=%s duration=%s", snapshot.ID, time.Since(stopStarted))
 	activated := false
 	rollback := func(cause error) error {
+		log.Warn("Rolling back standby snapshot installation: snapshot=%s activated=%t cause=%v", snapshot.ID, activated, cause)
 		var rollbackErrors []error
 		if err := systemctlWithTimeout(cfg.ServiceTimeout, "stop", cfg.GiteaServiceName); err != nil {
+			log.Error("Rollback cannot stop standby service: snapshot=%s error=%v", snapshot.ID, err)
 			return errors.Join(cause, fmt.Errorf("cannot safely stop failed restored service: %w", err))
 		}
 		if activated {
+			rollbackStarted := time.Now()
 			if err := atomicSwitchWithTimeout(cfg.ServiceTimeout, cfg); err != nil {
+				log.Error("Rollback data exchange failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(rollbackStarted), err)
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("atomically restore previous data: %w", err))
 			} else {
+				log.Info("Restored previous standby data after failed activation: snapshot=%s duration=%s", snapshot.ID, time.Since(rollbackStarted))
 				activated = false
 				failed := filepath.Join(cfg.SnapshotDir, ".failed-"+snapshot.ID)
 				if _, err := os.Lstat(failed); err == nil {
@@ -104,14 +128,20 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 			}
 		}
 		if wasActive {
+			restartStarted := time.Now()
 			if err := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); err != nil {
+				log.Error("Rollback could not restart previous standby service: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(restartStarted), err)
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("restart previous gitea: %w", err))
+			} else {
+				log.Info("Restarted previous standby service after rollback: snapshot=%s duration=%s", snapshot.ID, time.Since(restartStarted))
 			}
 		}
 		return errors.Join(append([]error{cause}, rollbackErrors...)...)
 	}
 
+	switchStarted := time.Now()
 	if err := atomicSwitchRunner(taskCtx, cfg); err != nil {
+		log.Error("Atomic standby data exchange failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(switchStarted), err)
 		rootAfter, rootErr := os.Lstat(root)
 		stageAfter, stageErr := os.Lstat(stage)
 		if rootErr == nil && stageErr == nil {
@@ -151,6 +181,7 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	}
 	stageOwned = false
 	activated = true
+	log.Info("Atomically activated standby snapshot: snapshot=%s duration=%s", snapshot.ID, time.Since(switchStarted))
 
 	if rel, err := filepath.Rel(root, setting.CustomConf); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		configPath := filepath.Join(root, rel)
@@ -160,24 +191,37 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 		if err := writeFileSynced(configPath, localConfig, configInfo.Mode().Perm()); err != nil {
 			return rollback(fmt.Errorf("preserve standby configuration: %w", err))
 		}
+		log.Debug("Preserved local standby configuration: snapshot=%s", snapshot.ID)
 	}
 
 	executable, err := executablePath()
 	if err != nil {
 		return rollback(fmt.Errorf("locate gitea executable: %w", err))
 	}
+	keysStarted := time.Now()
 	if err := regenerateKeys(taskCtx, executable, setting.CustomConf); err != nil {
+		log.Error("Regenerate standby authorized keys failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(keysStarted), err)
 		return rollback(fmt.Errorf("regenerate authorized_keys: %w", err))
 	}
+	log.Info("Regenerated standby authorized keys: snapshot=%s duration=%s", snapshot.ID, time.Since(keysStarted))
+	startStarted := time.Now()
 	if err := systemctl(taskCtx, "start", cfg.GiteaServiceName); err != nil {
+		log.Error("Start restored standby service failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(startStarted), err)
 		return rollback(fmt.Errorf("start restored gitea: %w", err))
 	}
+	log.Info("Started restored standby service: snapshot=%s duration=%s", snapshot.ID, time.Since(startStarted))
+	readinessStarted := time.Now()
 	if err := readinessCheck(taskCtx, cfg.GiteaServiceName); err != nil {
+		log.Error("Restored standby readiness check failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(readinessStarted), err)
 		return rollback(fmt.Errorf("restored gitea failed readiness: %w", err))
 	}
+	log.Info("Restored standby passed readiness check: snapshot=%s duration=%s", snapshot.ID, time.Since(readinessStarted))
+	verifiedStopStarted := time.Now()
 	if err := systemctl(taskCtx, "stop", cfg.GiteaServiceName); err != nil {
+		log.Error("Stop verified standby service failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(verifiedStopStarted), err)
 		return rollback(fmt.Errorf("stop verified standby gitea: %w", err))
 	}
+	log.Info("Stopped verified standby service: snapshot=%s duration=%s", snapshot.ID, time.Since(verifiedStopStarted))
 
 	// The new service is healthy. The restore process may still have its working
 	// directory in the old root, which became stage after the atomic exchange.
@@ -187,12 +231,15 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	}
 	// Cleanup failure must not turn a successful activation into a retry loop; a
 	// later maintenance job may remove the backup.
+	cleanupStarted := time.Now()
 	if err := cleanupBackup(stage); err != nil {
+		log.Warn("Remove previous standby data backup failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(cleanupStarted), err)
 		return &cleanupWarning{err: err}
 	}
 	if err := syncDirectory(cfg.SnapshotDir); err != nil {
 		return &cleanupWarning{err: err}
 	}
+	log.Info("Standby snapshot installation finished: snapshot=%s duration=%s", snapshot.ID, time.Since(installStarted))
 	return nil
 }
 
@@ -295,6 +342,8 @@ func systemctlWithTimeout(timeout time.Duration, action, service string) error {
 }
 
 func waitForGitea(ctx context.Context, service string) error {
+	started := time.Now()
+	nextProgressLog := started.Add(10 * time.Second)
 	client := &http.Client{Timeout: 2 * time.Second}
 	healthURL := strings.TrimRight(setting.LocalURL, "/") + "/api/healthz"
 	var lastErr error
@@ -320,9 +369,15 @@ func waitForGitea(ctx context.Context, service string) error {
 		} else {
 			lastErr = err
 		}
+		if now := time.Now(); !now.Before(nextProgressLog) {
+			log.Info("Waiting for Gitea readiness: service=%s elapsed=%s last_error=%v", service, now.Sub(started), lastErr)
+			nextProgressLog = now.Add(15 * time.Second)
+		}
 		select {
 		case <-ctx.Done():
-			return errors.Join(lastErr, ctx.Err())
+			waitErr := errors.Join(lastErr, ctx.Err())
+			log.Error("Gitea readiness check ended: service=%s elapsed=%s error=%v", service, time.Since(started), waitErr)
+			return waitErr
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
