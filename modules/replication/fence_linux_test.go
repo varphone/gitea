@@ -139,9 +139,12 @@ func TestIncrementalSnapshotServesTaskManifestFromMemory(t *testing.T) {
 	manifest.State = "transferring"
 
 	server := &controlServer{
-		cfg:           &config{SnapshotDir: t.TempDir()},
-		taskManifests: map[string]*SnapshotManifest{manifest.ID: manifest},
-		dataRoot:      root,
+		cfg:              &config{SnapshotDir: t.TempDir()},
+		jobs:             map[string]*Snapshot{manifest.ID: {ID: manifest.ID, State: "transferring"}},
+		taskManifests:    map[string]*SnapshotManifest{manifest.ID: manifest},
+		taskChunkIndexes: map[string]map[string]chunkLocation{manifest.ID: indexManifest(manifest)},
+		session:          &finalSyncSession{id: manifest.ID},
+		dataRoot:         root,
 	}
 	hash := manifest.Files[0].Chunks[0].Hash
 	response := httptest.NewRecorder()

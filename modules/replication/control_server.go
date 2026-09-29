@@ -33,8 +33,9 @@ type syncJobRequest struct {
 }
 
 const (
-	syncJobsPath          = "/api/v1/replication/sync-jobs"
-	maxSyncJobRequestSize = 1 << 20
+	syncJobsPath             = "/api/v1/replication/sync-jobs"
+	maxSyncJobRequestSize    = 1 << 20
+	maxConcurrentChunkServes = 8
 )
 
 func validReplicationRequestID(id string) bool {
@@ -66,6 +67,7 @@ const snapshotStateCreating = "creating"
 type controlServer struct {
 	cfg                    *config
 	mu                     sync.RWMutex
+	chunkMu                sync.RWMutex
 	jobs                   map[string]*Snapshot
 	taskManifests          map[string]*SnapshotManifest
 	taskChunkIndexes       map[string]map[string]chunkLocation
@@ -73,6 +75,7 @@ type controlServer struct {
 	primaryRecoveryPending bool
 	session                *finalSyncSession
 	dataRoot               string
+	chunkSlots             chan struct{}
 }
 
 func (s *controlServer) root() string {
@@ -105,7 +108,7 @@ func ServeControl(ctx context.Context) error {
 	}
 	s := &controlServer{
 		cfg: cfg, jobs: jobs, taskManifests: map[string]*SnapshotManifest{},
-		taskChunkIndexes: map[string]map[string]chunkLocation{},
+		taskChunkIndexes: map[string]map[string]chunkLocation{}, chunkSlots: make(chan struct{}, maxConcurrentChunkServes),
 	}
 	removeLegacyArchives(cfg.SnapshotDir)
 	primaryRecoveryRequired := false
@@ -371,6 +374,20 @@ func (s *controlServer) getTaskChunkLocation(id, hash string) (chunkLocation, bo
 	index, indexed := s.taskChunkIndexes[id]
 	location, ok := index[hash]
 	return location, ok, indexed
+}
+
+func (s *controlServer) tryAcquireChunkSlot() (chan struct{}, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.chunkSlots == nil {
+		s.chunkSlots = make(chan struct{}, maxConcurrentChunkServes)
+	}
+	select {
+	case s.chunkSlots <- struct{}{}:
+		return s.chunkSlots, true
+	default:
+		return nil, false
+	}
 }
 
 func (s *controlServer) setTaskManifest(manifest *SnapshotManifest) {

@@ -495,6 +495,8 @@ func (s *controlServer) expireSession(session *finalSyncSession) {
 }
 
 func (s *controlServer) finishSession(id string, success bool) error {
+	s.chunkMu.Lock()
+	defer s.chunkMu.Unlock()
 	finishStarted := time.Now()
 	requestedAction := "complete"
 	if !success {
@@ -571,6 +573,19 @@ func (s *controlServer) finishSession(id string, success bool) error {
 	return finishErr
 }
 
+func (s *controlServer) canServeChunk(id string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	job := s.jobs[id]
+	if job == nil {
+		return false
+	}
+	if job.State == "preflight" {
+		return true
+	}
+	return job.State == "transferring" && s.session != nil && s.session.id == id
+}
+
 func (s *controlServer) syncSnapshot(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, syncJobsPath+"/"), "/")
 	if len(parts) != 3 || !validSnapshotID(parts[0]) {
@@ -583,24 +598,36 @@ func (s *controlServer) syncSnapshot(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		s.chunkMu.RLock()
+		chunkLockHeld := true
+		defer func() {
+			if chunkLockHeld {
+				s.chunkMu.RUnlock()
+			}
+		}()
+		if !s.canServeChunk(id) {
+			http.NotFound(w, r)
+			return
+		}
+		slots, acquired := s.tryAcquireChunkSlot()
+		if !acquired {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "replication chunk service is busy", http.StatusServiceUnavailable)
+			return
+		}
+		defer func() { <-slots }()
 		location, ok, indexed := s.getTaskChunkLocation(id, value)
 		if !indexed {
-			manifest := s.getTaskManifest(id)
-			if manifest == nil {
-				var err error
-				manifest, err = loadManifestFile(manifestPath(s.cfg.SnapshotDir, id))
-				if err != nil {
-					http.NotFound(w, r)
-					return
-				}
-			}
-			location, ok = indexManifest(manifest)[value]
+			http.NotFound(w, r)
+			return
 		}
 		if !ok {
 			http.NotFound(w, r)
 			return
 		}
 		data, err := readChunk(s.root(), location, value)
+		s.chunkMu.RUnlock()
+		chunkLockHeld = false
 		if err != nil {
 			log.Warn("Failed to serve replication chunk: snapshot=%s hash=%s error=%v", id, value, err)
 			http.Error(w, err.Error(), http.StatusConflict)
