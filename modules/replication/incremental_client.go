@@ -855,11 +855,30 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 					return err
 				}
 			}
-			if err := out.Close(); err != nil {
+			if err := out.Chmod(os.FileMode(entry.Mode)); err != nil {
+				_ = out.Close()
 				return err
 			}
 			mtime := time.Unix(0, entry.ModTimeNS)
 			if err := os.Chtimes(tmp, mtime, mtime); err != nil {
+				_ = out.Close()
+				return err
+			}
+			if file, err := os.Open(tmp); err == nil {
+				if err := file.Close(); err != nil {
+					_ = out.Close()
+					return err
+				}
+			} else if os.IsPermission(err) {
+				if err := out.Sync(); err != nil {
+					_ = out.Close()
+					return err
+				}
+			} else {
+				_ = out.Close()
+				return err
+			}
+			if err := out.Close(); err != nil {
 				return err
 			}
 			if err := os.Rename(tmp, dst); err != nil {
