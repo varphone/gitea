@@ -492,6 +492,16 @@ func indexManifest(m *SnapshotManifest) map[string]chunkLocation {
 	return index
 }
 
+func manifestChunkSet(m *SnapshotManifest) map[string]struct{} {
+	chunks := make(map[string]struct{})
+	for _, entry := range m.Files {
+		for _, chunk := range entry.Chunks {
+			chunks[chunk.Hash] = struct{}{}
+		}
+	}
+	return chunks
+}
+
 func readChunk(root string, loc chunkLocation, expected string) ([]byte, error) {
 	if err := validateTreePath(loc.Path); err != nil {
 		return nil, err

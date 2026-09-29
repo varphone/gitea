@@ -578,11 +578,9 @@ func transferRateMiBPerSecond(size int64, duration time.Duration) float64 {
 
 func fetchMissingChunks(ctx context.Context, client *http.Client, base, token string, manifest, previous *SnapshotManifest, cacheDir string, tolerateChanges bool) error {
 	passStarted := time.Now()
-	available := map[string]struct{}{}
+	var available map[string]struct{}
 	if previous != nil {
-		for hash := range indexManifest(previous) {
-			available[hash] = struct{}{}
-		}
+		available = manifestChunkSet(previous)
 	}
 	manifestChunks := indexManifest(manifest)
 	total := len(manifestChunks)
