@@ -26,6 +26,13 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	if !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
 		return errors.New("install stage must be a real directory")
 	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return fmt.Errorf("stat APP_WORK_PATH: %w", err)
+	}
+	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("APP_WORK_PATH must be a real directory")
+	}
 	localConfig, err := os.ReadFile(setting.CustomConf)
 	if err != nil {
 		return fmt.Errorf("read standby configuration: %w", err)
@@ -102,6 +109,36 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	}
 
 	if err := atomicSwitchRunner(taskCtx, cfg); err != nil {
+		rootAfter, rootErr := os.Lstat(root)
+		stageAfter, stageErr := os.Lstat(stage)
+		if rootErr == nil && stageErr == nil {
+			switched := os.SameFile(rootAfter, stageInfo) && os.SameFile(stageAfter, rootInfo)
+			unchanged := os.SameFile(rootAfter, rootInfo) && os.SameFile(stageAfter, stageInfo)
+			if switched {
+				stageOwned = false
+				activated = true
+				return rollback(fmt.Errorf("atomic data exchange completed but its service reported an error: %w", err))
+			}
+			if !unchanged {
+				stageOwned = false
+				stateErr := errors.New("cannot determine whether atomic data exchange completed; preserving install stage")
+				if wasActive {
+					if startErr := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); startErr != nil {
+						stateErr = errors.Join(stateErr, fmt.Errorf("restart gitea after uncertain data exchange: %w", startErr))
+					}
+				}
+				return errors.Join(fmt.Errorf("atomically activate restored data: %w", err), stateErr)
+			}
+		} else {
+			stageOwned = false
+			stateErr := errors.Join(rootErr, stageErr, errors.New("cannot determine whether atomic data exchange completed; preserving install stage"))
+			if wasActive {
+				if startErr := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); startErr != nil {
+					stateErr = errors.Join(stateErr, fmt.Errorf("restart gitea after uncertain data exchange: %w", startErr))
+				}
+			}
+			return errors.Join(fmt.Errorf("atomically activate restored data: %w", err), stateErr)
+		}
 		if wasActive {
 			if startErr := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); startErr != nil {
 				return errors.Join(fmt.Errorf("atomically activate restored data: %w", err), fmt.Errorf("restart unchanged gitea: %w", startErr))
