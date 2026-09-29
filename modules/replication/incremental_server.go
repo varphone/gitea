@@ -412,6 +412,7 @@ func (s *controlServer) finishSession(id string, success bool) error {
 	}
 	session := s.session
 	s.session = nil
+	s.busy = true
 	job := s.jobs[id]
 	s.mu.Unlock()
 	startErr := s.startPrimary()
@@ -454,10 +455,10 @@ func (s *controlServer) finishSession(id string, success bool) error {
 		session.cancel()
 	}
 	close(session.finished)
+	s.prune()
 	s.mu.Lock()
 	s.busy = false
 	s.mu.Unlock()
-	s.prune()
 	return finishErr
 }
 
