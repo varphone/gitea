@@ -74,7 +74,10 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 		return fmt.Errorf("acquire standby write fence: %w", err)
 	}
 	defer func() { _ = fence.Release() }()
-	wasActive := systemctl(taskCtx, "is-active", cfg.GiteaServiceName) == nil
+	wasActive, err := systemctlUnitActive(taskCtx, cfg.GiteaServiceName)
+	if err != nil {
+		return err
+	}
 	if err := systemctl(taskCtx, "stop", cfg.GiteaServiceName); err != nil {
 		return fmt.Errorf("stop standby gitea: %w", err)
 	}
@@ -248,9 +251,38 @@ func systemctl(ctx context.Context, action, service string) error {
 	return systemctlRunner(ctx, action, service)
 }
 
+var errSystemctlUnitInactive = errors.New("inactive")
+
+func systemctlUnitActive(ctx context.Context, service string) (bool, error) {
+	err := systemctl(ctx, "is-active", service)
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		switch exitErr.ExitCode() {
+		case 3:
+			return false, nil
+		case 4:
+			if strings.HasSuffix(service, ".socket") {
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("query systemd state for %s: %w", service, err)
+	}
+	if errors.Is(err, errSystemctlUnitInactive) {
+		return false, nil
+	}
+	return false, fmt.Errorf("query systemd state for %s: %w", service, err)
+}
+
 func ensureSocketActivationDisabled(ctx context.Context, service string) error {
 	socket := strings.TrimSuffix(service, ".service") + ".socket"
-	if err := systemctl(ctx, "is-active", socket); err == nil {
+	active, err := systemctlUnitActive(ctx, socket)
+	if err != nil {
+		return err
+	}
+	if active {
 		return fmt.Errorf("socket activation unit %s must be disabled for consistent snapshots", socket)
 	}
 	return nil

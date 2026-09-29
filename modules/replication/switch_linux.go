@@ -79,7 +79,11 @@ func SwitchDataRoot() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if systemctl(ctx, "is-active", cfg.GiteaServiceName) == nil {
+	active, err := systemctlUnitActive(ctx, cfg.GiteaServiceName)
+	if err != nil {
+		return err
+	}
+	if active {
 		return fmt.Errorf("%s must be stopped before atomic data exchange", cfg.GiteaServiceName)
 	}
 	if err := ensureSocketActivationDisabled(ctx, cfg.GiteaServiceName); err != nil {

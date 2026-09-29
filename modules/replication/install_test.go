@@ -77,7 +77,7 @@ func TestInstallSnapshotRollbackAndSuccess(t *testing.T) {
 			systemctlRunner = func(_ context.Context, action, service string) error {
 				actions = append(actions, action+":"+service)
 				if action == "is-active" && strings.HasSuffix(service, ".socket") {
-					return errors.New("inactive")
+					return errSystemctlUnitInactive
 				}
 				return nil
 			}

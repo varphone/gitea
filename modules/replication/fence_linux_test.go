@@ -56,7 +56,7 @@ func TestIncrementalHTTPRoundTripAndSecondDelta(t *testing.T) {
 	writeFencePath = filepath.Join(t.TempDir(), "write.lock")
 	systemctlRunner = func(_ context.Context, action, service string) error {
 		if action == "is-active" && service == "gitea.socket" {
-			return errors.New("inactive")
+			return errSystemctlUnitInactive
 		}
 		return nil
 	}
@@ -285,7 +285,7 @@ func TestIncrementalFinalizationOnlyRechunksChanges(t *testing.T) {
 	systemctlRunner = func(_ context.Context, action, service string) error {
 		actions = append(actions, action+":"+service)
 		if action == "is-active" && service == "gitea.socket" {
-			return errors.New("inactive")
+			return errSystemctlUnitInactive
 		}
 		return nil
 	}
