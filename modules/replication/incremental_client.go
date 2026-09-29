@@ -183,6 +183,17 @@ func responseStatusError(prefix string, resp *http.Response) error {
 	return fmt.Errorf("%s returned %s: %s", prefix, resp.Status, message)
 }
 
+func decodeBoundedJSON(body io.Reader, maxSize int64, value any) error {
+	data, err := io.ReadAll(io.LimitReader(body, maxSize+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) > maxSize {
+		return fmt.Errorf("JSON response exceeds maximum size of %d bytes", maxSize)
+	}
+	return json.Unmarshal(data, value)
+}
+
 func decodeManifestResponse(body io.Reader) (SnapshotManifest, error) {
 	data, readErr := io.ReadAll(io.LimitReader(body, maxManifestSize+1))
 	if len(data) > maxManifestSize {
@@ -239,7 +250,7 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 		}
 		if resp.StatusCode == http.StatusAccepted {
 			var job Snapshot
-			if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&job); err != nil {
+			if err := decodeBoundedJSON(resp.Body, 1<<20, &job); err != nil {
 				_ = resp.Body.Close()
 				if attempt < requestRetryLimit && shouldRetryRequestError(err) {
 					if retryErr := waitForRetry(ctx, attempt, operation, err); retryErr != nil {
@@ -324,7 +335,7 @@ func requestSnapshotStatus(ctx context.Context, client *http.Client, base, token
 		return nil, fmt.Errorf("snapshot %s returned %s", id, resp.Status)
 	}
 	var snapshot Snapshot
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&snapshot); err != nil {
+	if err := decodeBoundedJSON(resp.Body, 1<<20, &snapshot); err != nil {
 		return nil, err
 	}
 	return &snapshot, nil

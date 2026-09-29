@@ -160,7 +160,7 @@ func ControlStatus(ctx context.Context) ([]*Snapshot, error) {
 		return nil, fmt.Errorf("control status returned %s", resp.Status)
 	}
 	var snapshots []*Snapshot
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&snapshots); err != nil {
+	if err := decodeBoundedJSON(resp.Body, 1<<20, &snapshots); err != nil {
 		return nil, err
 	}
 	return snapshots, nil
