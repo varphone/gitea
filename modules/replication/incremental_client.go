@@ -68,7 +68,7 @@ func retryDelay(attempt int) time.Duration {
 }
 
 func shouldRetryHTTPStatus(status int) bool {
-	return status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+	return status == http.StatusInternalServerError || status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
 
 func shouldRetryRequestError(err error) bool {
@@ -81,6 +81,7 @@ func shouldRetryRequestError(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "gzip:") ||
 		strings.Contains(message, "connection reset") ||
 		strings.Contains(message, "broken pipe") ||
 		strings.Contains(message, "refused") ||
