@@ -38,7 +38,10 @@ const (
 	maxSyncJobRequestSize    = 1 << 20
 	maxConcurrentChunkServes = 8
 	minChunkCompressionSave  = 5
+	maxPooledChunkGzipBuffer = 2 << 20
 )
+
+var chunkGzipBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
 func validReplicationRequestID(id string) bool {
 	if len(id) != 32 {
@@ -534,40 +537,54 @@ func requestAcceptsGzip(r *http.Request) bool {
 	return wildcardFound && wildcardQuality > 0
 }
 
-func gzipChunk(data []byte) ([]byte, bool) {
-	var compressed bytes.Buffer
-	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
+func releaseChunkGzipBuffer(buffer *bytes.Buffer) {
+	if buffer.Cap() <= maxPooledChunkGzipBuffer {
+		buffer.Reset()
+		chunkGzipBuffers.Put(buffer)
+	}
+}
+
+func gzipChunk(data []byte) (*bytes.Buffer, bool) {
+	compressed := chunkGzipBuffers.Get().(*bytes.Buffer)
+	compressed.Reset()
+	writer, err := gzip.NewWriterLevel(compressed, gzip.BestSpeed)
 	if err != nil {
+		releaseChunkGzipBuffer(compressed)
 		return nil, false
 	}
 	if _, err := writer.Write(data); err != nil {
 		_ = writer.Close()
+		releaseChunkGzipBuffer(compressed)
 		return nil, false
 	}
 	if err := writer.Close(); err != nil {
+		releaseChunkGzipBuffer(compressed)
 		return nil, false
 	}
 	if compressed.Len()*100 >= len(data)*(100-minChunkCompressionSave) {
+		releaseChunkGzipBuffer(compressed)
 		return nil, false
 	}
-	return compressed.Bytes(), true
+	return compressed, true
 }
 
 func writeChunk(w http.ResponseWriter, r *http.Request, data []byte) (int, bool) {
-	body := data
-	compressed := false
 	w.Header().Add("Vary", "Accept-Encoding")
 	if requestAcceptsGzip(r) {
 		if gzipData, ok := gzipChunk(data); ok {
-			body = gzipData
-			compressed = true
+			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Content-Length", strconv.Itoa(gzipData.Len()))
+			_, _ = w.Write(gzipData.Bytes())
+			responseBodyBytes := gzipData.Len()
+			releaseChunkGzipBuffer(gzipData)
+			return responseBodyBytes, true
 		}
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	_, _ = w.Write(body)
-	return len(body), compressed
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	_, _ = w.Write(data)
+	return len(data), false
 }
 
 func writeJSONStatus(w http.ResponseWriter, status int, value any) {
