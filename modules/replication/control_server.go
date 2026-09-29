@@ -568,23 +568,29 @@ func gzipChunk(data []byte) (*bytes.Buffer, bool) {
 	return compressed, true
 }
 
-func writeChunk(w http.ResponseWriter, r *http.Request, data []byte) (int, bool) {
+func writeChunk(w http.ResponseWriter, r *http.Request, data []byte) (int, bool, error) {
 	w.Header().Add("Vary", "Accept-Encoding")
 	if requestAcceptsGzip(r) {
 		if gzipData, ok := gzipChunk(data); ok {
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("Content-Encoding", "gzip")
-			w.Header().Set("Content-Length", strconv.Itoa(gzipData.Len()))
-			_, _ = w.Write(gzipData.Bytes())
-			responseBodyBytes := gzipData.Len()
+			expectedBytes := gzipData.Len()
+			w.Header().Set("Content-Length", strconv.Itoa(expectedBytes))
+			responseBodyBytes, err := w.Write(gzipData.Bytes())
 			releaseChunkGzipBuffer(gzipData)
-			return responseBodyBytes, true
+			if err == nil && responseBodyBytes != expectedBytes {
+				err = io.ErrShortWrite
+			}
+			return responseBodyBytes, true, err
 		}
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	_, _ = w.Write(data)
-	return len(data), false
+	responseBodyBytes, err := w.Write(data)
+	if err == nil && responseBodyBytes != len(data) {
+		err = io.ErrShortWrite
+	}
+	return responseBodyBytes, false, err
 }
 
 func writeJSONStatus(w http.ResponseWriter, status int, value any) {

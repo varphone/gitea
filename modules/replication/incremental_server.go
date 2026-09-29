@@ -636,7 +636,11 @@ func (s *controlServer) syncSnapshot(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		bodyBytes, compressed := writeChunk(w, r, data)
+		bodyBytes, compressed, err := writeChunk(w, r, data)
+		if err != nil {
+			log.Warn("Failed to write replication chunk response: snapshot=%s hash=%s payload_bytes=%d response_body_bytes=%d gzip=%t error=%v", id, value, len(data), bodyBytes, compressed, err)
+			return
+		}
 		log.Debug("Served replication chunk: snapshot=%s hash=%s payload_bytes=%d response_body_bytes=%d gzip=%t", id, value, len(data), bodyBytes, compressed)
 		return
 	}
