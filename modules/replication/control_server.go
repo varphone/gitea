@@ -4,6 +4,7 @@
 package replication
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -36,6 +37,7 @@ const (
 	syncJobsPath             = "/api/v1/replication/sync-jobs"
 	maxSyncJobRequestSize    = 1 << 20
 	maxConcurrentChunkServes = 8
+	minChunkCompressionSave  = 5
 )
 
 func validReplicationRequestID(id string) bool {
@@ -518,6 +520,79 @@ func writeJSONMaybeGzip(w http.ResponseWriter, r *http.Request, payload any) {
 		}
 	}
 	writeJSON(w, payload)
+}
+
+func requestAcceptsGzip(r *http.Request) bool {
+	var gzipQuality, wildcardQuality float64
+	gzipFound, wildcardFound := false, false
+	for _, header := range r.Header.Values("Accept-Encoding") {
+		for item := range strings.SplitSeq(header, ",") {
+			encoding, parameters, _ := strings.Cut(strings.TrimSpace(item), ";")
+			quality := 1.0
+			valid := true
+			for parameter := range strings.SplitSeq(parameters, ";") {
+				name, value, ok := strings.Cut(strings.TrimSpace(parameter), "=")
+				if !ok || !strings.EqualFold(name, "q") {
+					continue
+				}
+				parsed, err := strconv.ParseFloat(value, 64)
+				if err != nil || parsed < 0 || parsed > 1 {
+					valid = false
+					break
+				}
+				quality = parsed
+			}
+			if !valid {
+				continue
+			}
+			switch {
+			case strings.EqualFold(encoding, "gzip") && !gzipFound:
+				gzipFound, gzipQuality = true, quality
+			case encoding == "*" && !wildcardFound:
+				wildcardFound, wildcardQuality = true, quality
+			}
+		}
+	}
+	if gzipFound {
+		return gzipQuality > 0
+	}
+	return wildcardFound && wildcardQuality > 0
+}
+
+func gzipChunk(data []byte) ([]byte, bool) {
+	var compressed bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
+	if err != nil {
+		return nil, false
+	}
+	if _, err := writer.Write(data); err != nil {
+		_ = writer.Close()
+		return nil, false
+	}
+	if err := writer.Close(); err != nil {
+		return nil, false
+	}
+	if compressed.Len()*100 >= len(data)*(100-minChunkCompressionSave) {
+		return nil, false
+	}
+	return compressed.Bytes(), true
+}
+
+func writeChunk(w http.ResponseWriter, r *http.Request, data []byte) (int, bool) {
+	body := data
+	compressed := false
+	w.Header().Add("Vary", "Accept-Encoding")
+	if requestAcceptsGzip(r) {
+		if gzipData, ok := gzipChunk(data); ok {
+			body = gzipData
+			compressed = true
+			w.Header().Set("Content-Encoding", "gzip")
+		}
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	_, _ = w.Write(body)
+	return len(body), compressed
 }
 
 func writeJSONStatus(w http.ResponseWriter, status int, value any) {

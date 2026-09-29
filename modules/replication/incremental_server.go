@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -634,10 +633,8 @@ func (s *controlServer) syncSnapshot(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		log.Debug("Served replication chunk: snapshot=%s hash=%s bytes=%d", id, value, len(data))
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		_, _ = w.Write(data)
+		bodyBytes, compressed := writeChunk(w, r, data)
+		log.Debug("Served replication chunk: snapshot=%s hash=%s payload_bytes=%d response_body_bytes=%d gzip=%t", id, value, len(data), bodyBytes, compressed)
 		return
 	}
 	if action == "session" && value == "complete" && r.Method == http.MethodPost {
