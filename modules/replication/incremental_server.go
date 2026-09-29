@@ -242,20 +242,21 @@ func (s *controlServer) runPreflightTask(id string) {
 	scanStarted := time.Now()
 	var manifest *SnapshotManifest
 	var err error
-	for attempt := 0; attempt < 5; attempt++ {
+scanAttempts:
+	for attempt := 1; attempt <= 5; attempt++ {
 		manifest, err = scanIncrementalTreeWithOptions(ctx, s.root(), base, verifyAll)
-		if err == nil || !strings.Contains(err.Error(), "changed while scanning") {
+		if err == nil || !errors.Is(err, errIncrementalTreeChanged) {
 			break
 		}
-		if attempt == 4 {
-			log.Warn("Preflight task %s scan still found changing files on final attempt=%d/5: %v", id, attempt+1, err)
-		} else {
-			log.Warn("Preflight task %s scan found changing files; retrying attempt=%d/5 error=%v", id, attempt+1, err)
+		if attempt == 5 {
+			log.Warn("Preflight task %s scan still found changing files on final attempt=%d/5: %v", id, attempt, err)
+			break
 		}
+		log.Warn("Preflight task %s scan found changing files; retrying attempt=%d/5 error=%v", id, attempt+1, err)
 		select {
 		case <-ctx.Done():
 			err = ctx.Err()
-			attempt = 5
+			break scanAttempts
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

@@ -32,7 +32,10 @@ const (
 	maxManifestSize          = 256 << 20
 )
 
-var errManifestTrailingData = errors.New("incremental manifest contains oversized or trailing data")
+var (
+	errManifestTrailingData   = errors.New("incremental manifest contains oversized or trailing data")
+	errIncrementalTreeChanged = errors.New("filesystem tree changed during scan")
+)
 
 type ChunkDescriptor struct {
 	Hash   string `json:"hash"`
@@ -234,6 +237,13 @@ func scanIncrementalTreeWithBase(ctx context.Context, root string, base *Snapsho
 	return scanIncrementalTreeWithOptions(ctx, root, base, false)
 }
 
+func scanPathError(rel string, err error) error {
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %s", errIncrementalTreeChanged, rel)
+	}
+	return fmt.Errorf("scan %q: %w", rel, err)
+}
+
 func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *SnapshotManifest, verifyAll bool) (*SnapshotManifest, error) {
 	rootInfo, err := os.Stat(root)
 	if err != nil {
@@ -254,7 +264,11 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 	}
 	err = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			return scanPathError(filepath.ToSlash(rel), walkErr)
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -272,10 +286,10 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 		case info.Mode()&os.ModeSymlink != 0:
 			e.Type = "symlink"
 			e.LinkTarget, err = os.Readlink(path)
-			if err == nil {
-				err = validateTreeLink(rel, e.LinkTarget)
-			}
 			if err != nil {
+				return scanPathError(rel, err)
+			}
+			if err := validateTreeLink(rel, e.LinkTarget); err != nil {
 				return err
 			}
 		case info.Mode().IsRegular():
@@ -294,11 +308,14 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 			beforeSize, beforeTime, beforeChangeID := info.Size(), info.ModTime(), e.ChangeID
 			e.Chunks, err = chunkFileForManifest(ctx, path)
 			if err != nil {
-				return err
+				return scanPathError(rel, err)
 			}
 			after, err := os.Stat(path)
-			if err != nil || after.Size() != beforeSize || after.ModTime() != beforeTime || fileChangeID(after) != beforeChangeID {
-				return fmt.Errorf("file changed while scanning: %s", rel)
+			if err != nil {
+				return scanPathError(rel, err)
+			}
+			if after.Size() != beforeSize || after.ModTime() != beforeTime || fileChangeID(after) != beforeChangeID {
+				return fmt.Errorf("%w: %s", errIncrementalTreeChanged, rel)
 			}
 			if verifyAll && metadataUnchanged && !sameChunks(e.Chunks, old.Chunks) {
 				return fmt.Errorf("content verification failed with unchanged metadata: %s", rel)
