@@ -12,6 +12,8 @@ artifacts must use local storage below the same `APP_WORK_PATH` on both
 servers. Keep the normal Gitea layout, such as `/var/lib/gitea`; no `current`
 subdirectory or symlink convention is required. Paths are resolved and storage
 outside this root is rejected.
+Filesystem paths and symlink targets included in a snapshot must be valid
+UTF-8 because manifests serialize them as JSON strings.
 
 `SNAPSHOT_DIR` contains signed JSON manifests on the primary, not copies of
 Git, LFS, or attachment data. On the standby it also contains a temporary

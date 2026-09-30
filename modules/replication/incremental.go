@@ -163,6 +163,9 @@ func validateTreePath(rel string) error {
 	if len(rel) > 4096 {
 		return errors.New("manifest path is too long")
 	}
+	if !utf8.ValidString(rel) || strings.IndexByte(rel, 0) >= 0 {
+		return errors.New("manifest path must be valid UTF-8 and cannot contain NUL")
+	}
 	clean := filepath.Clean(filepath.FromSlash(rel))
 	if rel == "" || clean == "." || filepath.IsAbs(clean) || clean == ".." ||
 		strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.ToSlash(clean) != rel {
@@ -177,6 +180,9 @@ func validateTreeLink(rel, target string) error {
 	}
 	if target == "" || len(target) > 4096 {
 		return errors.New("invalid symlink target length")
+	}
+	if !utf8.ValidString(target) || strings.IndexByte(target, 0) >= 0 {
+		return errors.New("symlink target must be valid UTF-8 and cannot contain NUL")
 	}
 	link := filepath.Clean(filepath.FromSlash(target))
 	if filepath.IsAbs(link) {
@@ -457,6 +463,9 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 		}
 		entriesSeen.Add(1)
 		rel = filepath.ToSlash(rel)
+		if err := validateTreePath(rel); err != nil {
+			return scanPathError(rel, err)
+		}
 		if info.IsDir() {
 			directories = append(directories, scannedDirectory{path: path, rel: rel, info: info})
 		}
