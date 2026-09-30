@@ -75,7 +75,11 @@ func responseRetryDelay(resp *http.Response, fallback time.Duration) time.Durati
 	if resp == nil {
 		return fallback
 	}
-	retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	return retryAfterDelay(resp.Header.Get("Retry-After"), fallback)
+}
+
+func retryAfterDelay(value string, fallback time.Duration) time.Duration {
+	retryAfter := strings.TrimSpace(value)
 	if retryAfter == "" {
 		return fallback
 	}
@@ -95,6 +99,14 @@ func shouldRetryHTTPStatus(status int) bool {
 		status == http.StatusTooManyRequests || status == http.StatusBadGateway ||
 		status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
+
+type httpResponseStatusError struct {
+	statusCode int
+	retryAfter string
+	message    string
+}
+
+func (e *httpResponseStatusError) Error() string { return e.message }
 
 type cancelRequestBody struct {
 	io.ReadCloser
@@ -281,18 +293,22 @@ func doRetryableRequest(ctx context.Context, client *http.Client, method, url, t
 }
 
 func responseStatusError(prefix string, resp *http.Response) error {
+	statusErr := &httpResponseStatusError{statusCode: resp.StatusCode, retryAfter: resp.Header.Get("Retry-After")}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, statusBodyPreviewLimit+1))
 	if err != nil {
-		return fmt.Errorf("%s returned %s (read body: %v)", prefix, resp.Status, err)
+		statusErr.message = fmt.Sprintf("%s returned %s (read body: %v)", prefix, resp.Status, err)
+		return statusErr
 	}
 	message := strings.TrimSpace(string(body))
 	if len(body) > statusBodyPreviewLimit {
 		message += "..."
 	}
 	if message == "" {
-		return fmt.Errorf("%s returned %s", prefix, resp.Status)
+		statusErr.message = fmt.Sprintf("%s returned %s", prefix, resp.Status)
+		return statusErr
 	}
-	return fmt.Errorf("%s returned %s: %s", prefix, resp.Status, message)
+	statusErr.message = fmt.Sprintf("%s returned %s: %s", prefix, resp.Status, message)
+	return statusErr
 }
 
 func decodeBoundedJSON(body io.Reader, maxSize int64, value any) error {
@@ -518,17 +534,23 @@ func pollManifestTask(ctx context.Context, client *http.Client, base, token, id,
 	log.Info("Submitted %s task %s; polling snapshot status", phase, id)
 	pollStarted := time.Now()
 	polls := 0
+	pollFailures := 0
 	ticker := time.NewTicker(manifestPollInterval)
 	defer ticker.Stop()
 	for {
 		snapshot, err := requestSnapshotStatus(ctx, client, base, token, id)
 		if err != nil {
-			log.Error("Failed to poll %s task %s after %s: %v", phase, id, time.Since(pollStarted), err)
-			return nil, err
+			pollFailures, err = waitForPollRetry(ctx, phase, id, pollStarted, pollFailures, err)
+			if err != nil {
+				log.Error("Failed to poll %s task %s after %s: %v", phase, id, time.Since(pollStarted), err)
+				return nil, err
+			}
+			continue
 		}
 		polls++
 		switch snapshot.State {
 		case snapshotStateCreating:
+			pollFailures = 0
 			if polls%60 == 0 {
 				log.Info("%s task %s is still creating: polls=%d elapsed=%s", phase, id, polls, time.Since(pollStarted))
 			}
@@ -546,12 +568,57 @@ func pollManifestTask(ctx context.Context, client *http.Client, base, token, id,
 			log.Error("%s task %s failed after %s", phase, id, time.Since(pollStarted))
 			return nil, fmt.Errorf("%s task %s failed", phase, id)
 		case expectedState:
+			manifest, err := requestManifestByID(ctx, client, base, token, id, expectedState)
+			if err != nil {
+				pollFailures, err = waitForPollRetry(ctx, phase+" manifest", id, pollStarted, pollFailures, err)
+				if err != nil {
+					log.Error("Failed to fetch %s task %s manifest after %s: %v", phase, id, time.Since(pollStarted), err)
+					return nil, err
+				}
+				continue
+			}
 			log.Info("%s task %s reached state %s after %s (%d polls); downloading manifest", phase, id, expectedState, time.Since(pollStarted), polls)
-			return requestManifestByID(ctx, client, base, token, id, expectedState)
+			return manifest, nil
 		default:
 			return nil, fmt.Errorf("%s task %s entered unexpected state %q", phase, id, snapshot.State)
 		}
 	}
+}
+
+func waitForPollRetry(ctx context.Context, phase, id string, pollStarted time.Time, failures int, err error) (int, error) {
+	if ctx.Err() != nil {
+		return failures, ctx.Err()
+	}
+	if errors.Is(err, errRemoteSnapshotUnavailable) || !retryablePollError(err) {
+		return failures, err
+	}
+	failures++
+	delay := retryDelay(min(failures, requestRetryLimit))
+	var statusErr *httpResponseStatusError
+	if errors.As(err, &statusErr) {
+		delay = retryAfterDelay(statusErr.retryAfter, delay)
+	}
+	if failures <= 8 || failures%30 == 0 {
+		log.Warn("Transient %s task request failed; retrying: task=%s failures=%d retry_in=%s elapsed=%s error=%v", phase, id, failures, delay, time.Since(pollStarted), err)
+	} else {
+		log.Debug("Transient %s task request still failing: task=%s failures=%d retry_in=%s elapsed=%s error=%v", phase, id, failures, delay, time.Since(pollStarted), err)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return failures, ctx.Err()
+	case <-timer.C:
+		return failures, nil
+	}
+}
+
+func retryablePollError(err error) bool {
+	var statusErr *httpResponseStatusError
+	if errors.As(err, &statusErr) {
+		return shouldRetryHTTPStatus(statusErr.statusCode)
+	}
+	return shouldRetryRequestError(err)
 }
 
 func requestChunk(ctx context.Context, client *http.Client, base, token, id, hash string) ([]byte, int64, error) {
