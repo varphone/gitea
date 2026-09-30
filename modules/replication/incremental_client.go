@@ -1610,7 +1610,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	} else {
 		log.Warn("Could not capture all staging file identities: snapshot=%s recorded=%d total=%d", manifest.ID, identitiesRecorded, fileCount)
 	}
-	log.Info("Built incremental staging tree: snapshot=%s files_reused=%d files_hardlinked=%d files_rebuilt=%d chunks_cached=%d cached_bytes=%d chunks_local=%d local_bytes=%d chunks_fetched=%d fetched_bytes=%d duration=%s", manifest.ID, stagedFilesReused, sourceFilesLinked, filesRebuilt, cacheChunks, cacheBytes, localChunks, localBytes, fetchedChunks, fetchedBytes, time.Since(stageStarted))
+	log.Info("Built incremental staging tree: snapshot=%s files_stage_reused=%d files_hardlinked_from_baseline=%d files_rebuilt=%d chunks_from_cache=%d cache_payload_bytes=%d chunks_from_local_baseline=%d local_payload_bytes=%d chunks_fetched_on_demand=%d fetched_payload_bytes=%d duration=%s", manifest.ID, stagedFilesReused, sourceFilesLinked, filesRebuilt, cacheChunks, cacheBytes, localChunks, localBytes, fetchedChunks, fetchedBytes, time.Since(stageStarted))
 	return nil
 }
 
