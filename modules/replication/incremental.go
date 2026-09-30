@@ -698,14 +698,45 @@ func prepareChunkCache(cacheDir string) error {
 	if err != nil {
 		return err
 	}
+	removedTemps := 0
 	for _, entry := range entries {
 		name := entry.Name()
 		if len(name) != 2 || !isLowerHex(name) {
 			continue
 		}
-		if err := ensureRealDirectory(filepath.Join(cacheDir, name)); err != nil {
+		shardPath := filepath.Join(cacheDir, name)
+		if err := ensureRealDirectory(shardPath); err != nil {
 			return err
 		}
+		shardEntries, err := os.ReadDir(shardPath)
+		if err != nil {
+			return err
+		}
+		for _, shardEntry := range shardEntries {
+			tempName, ok := strings.CutPrefix(shardEntry.Name(), ".")
+			if !ok {
+				continue
+			}
+			hash, suffix, ok := strings.Cut(tempName, ".tmp-")
+			if !ok || suffix == "" || len(hash) != 64 || !isLowerHex(hash) || !strings.HasPrefix(hash, name) {
+				continue
+			}
+			tempPath := filepath.Join(shardPath, shardEntry.Name())
+			info, err := os.Lstat(tempPath)
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+				continue
+			}
+			if err := os.Remove(tempPath); err != nil {
+				return fmt.Errorf("remove orphaned replication chunk cache temp file %q: %w", tempPath, err)
+			}
+			removedTemps++
+		}
+	}
+	if removedTemps > 0 {
+		log.Info("Removed orphaned replication chunk cache temp files: count=%d", removedTemps)
 	}
 	return nil
 }
