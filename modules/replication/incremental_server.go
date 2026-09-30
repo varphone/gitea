@@ -655,10 +655,10 @@ func (s *controlServer) syncSnapshot(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		data, err := readChunk(s.root(), location, value)
+		data, err := readChunkFromRoot(s.root(), s.resolvedRoot, location, value)
 		if err != nil {
 			for _, alternate := range s.getTaskChunkAlternates(id, value) {
-				data, err = readChunk(s.root(), alternate, value)
+				data, err = readChunkFromRoot(s.root(), s.resolvedRoot, alternate, value)
 				if err == nil {
 					log.Debug("Served replication chunk from alternate manifest location: snapshot=%s hash=%s path=%s", id, value, alternate.Path)
 					break

@@ -990,15 +990,19 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	oldEntries := map[string]TreeEntry{}
 	oldChunks := map[string]chunkLocation{}
 	oldChunkAlternates := map[string][]chunkLocation{}
+	var resolvedRoot string
 	verifyLocal := previous != nil && !manifest.FullScanAt.IsZero() && manifest.FullScanAt.After(previous.FullScanAt)
 	if previous != nil {
+		resolvedRoot, err = resolvedPath(root)
+		if err != nil {
+			return err
+		}
 		for _, entry := range previous.Files {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			oldEntries[entry.Path] = entry
 		}
-		var err error
 		oldChunks, oldChunkAlternates, err = indexManifestWithAlternatesContext(ctx, previous)
 		if err != nil {
 			return err
@@ -1082,10 +1086,10 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 				if cached, err := readCachedChunk(cacheDir, chunk.Hash); err == nil {
 					data = cached
 				} else if location, ok := oldChunks[chunk.Hash]; ok {
-					data, err = readChunk(root, location, chunk.Hash)
+					data, err = readChunkFromRoot(root, resolvedRoot, location, chunk.Hash)
 					if err != nil {
 						for _, alternate := range oldChunkAlternates[chunk.Hash] {
-							data, err = readChunk(root, alternate, chunk.Hash)
+							data, err = readChunkFromRoot(root, resolvedRoot, alternate, chunk.Hash)
 							if err == nil {
 								log.Debug("Reused replication chunk from alternate local manifest location: snapshot=%s hash=%s path=%s", manifest.ID, chunk.Hash, alternate.Path)
 								break

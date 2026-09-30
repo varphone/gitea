@@ -603,16 +603,23 @@ func manifestChunkSet(ctx context.Context, m *SnapshotManifest) (map[string]stru
 }
 
 func readChunk(root string, loc chunkLocation, expected string) ([]byte, error) {
+	return readChunkFromRoot(root, "", loc, expected)
+}
+
+func readChunkFromRoot(root, resolvedRoot string, loc chunkLocation, expected string) ([]byte, error) {
 	if err := validateTreePath(loc.Path); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(root, filepath.FromSlash(loc.Path))
-	rootResolved, err := resolvedPath(root)
-	if err != nil {
-		return nil, err
+	if resolvedRoot == "" {
+		var err error
+		resolvedRoot, err = resolvedPath(root)
+		if err != nil {
+			return nil, err
+		}
 	}
 	pathResolved, err := resolvedPath(path)
-	if err != nil || !isWithin(rootResolved, pathResolved) {
+	if err != nil || !isWithin(resolvedRoot, pathResolved) {
 		return nil, errors.New("chunk source resolves outside data root")
 	}
 	info, err := os.Lstat(path)

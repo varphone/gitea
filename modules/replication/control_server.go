@@ -81,6 +81,7 @@ type controlServer struct {
 	primaryRecoveryPending bool
 	session                *finalSyncSession
 	dataRoot               string
+	resolvedRoot           string
 	chunkSlots             chan struct{}
 	taskChunkAlternates    map[string]map[string][]chunkLocation
 }
@@ -117,6 +118,10 @@ func ServeControl(ctx context.Context) error {
 		cfg: cfg, jobs: jobs, taskManifests: map[string]*SnapshotManifest{},
 		taskChunkIndexes: map[string]map[string]chunkLocation{}, taskChunkAlternates: map[string]map[string][]chunkLocation{},
 		chunkSlots: make(chan struct{}, maxConcurrentChunkServes),
+	}
+	s.resolvedRoot, err = resolvedPath(s.root())
+	if err != nil {
+		return fmt.Errorf("resolve replication data root: %w", err)
 	}
 	removeLegacyArchives(cfg.SnapshotDir)
 	primaryRecoveryRequired := false
