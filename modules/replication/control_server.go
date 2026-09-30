@@ -103,12 +103,15 @@ const snapshotStateCreating = "creating"
 
 type controlServer struct {
 	cfg                    *config
+	taskCtx                context.Context
+	taskWG                 sync.WaitGroup
 	mu                     sync.RWMutex
 	chunkMu                sync.RWMutex
 	jobs                   map[string]*Snapshot
 	taskManifests          map[string]*SnapshotManifest
 	taskChunkIndexes       map[string]map[string]chunkLocation
 	busy                   bool
+	shuttingDown           bool
 	primaryRecoveryPending bool
 	session                *finalSyncSession
 	dataRoot               string
@@ -122,6 +125,13 @@ func (s *controlServer) root() string {
 		return s.dataRoot
 	}
 	return setting.AppWorkPath
+}
+
+func (s *controlServer) taskContext() context.Context {
+	if s.taskCtx != nil {
+		return s.taskCtx
+	}
+	return context.Background()
 }
 
 func ServeControl(ctx context.Context) error {
@@ -141,12 +151,14 @@ func ServeControl(ctx context.Context) error {
 	if err := validateAtomicLayout(cfg.SnapshotDir); err != nil {
 		return err
 	}
+	taskCtx, cancelTasks := context.WithCancel(context.Background())
+	defer cancelTasks()
 	jobs, transferCheckpointFound, err := loadManifests(cfg.SnapshotDir, cfg.ControlToken)
 	if err != nil {
 		return err
 	}
 	s := &controlServer{
-		cfg: cfg, jobs: jobs, taskManifests: map[string]*SnapshotManifest{},
+		cfg: cfg, taskCtx: taskCtx, jobs: jobs, taskManifests: map[string]*SnapshotManifest{},
 		taskChunkIndexes: map[string]map[string]chunkLocation{}, taskChunkAlternates: map[string]map[string][]chunkLocation{},
 		chunkSlots: make(chan struct{}, maxConcurrentChunkServes),
 	}
@@ -217,18 +229,45 @@ func ServeControl(ctx context.Context) error {
 	mux.HandleFunc(syncJobsPath, s.auth(s.syncTasks))
 	mux.HandleFunc(syncJobsPath+"/", s.auth(s.syncTask))
 	server := &http.Server{Addr: cfg.ControlListen, Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 16 << 10}
+	shutdownDone := make(chan struct{})
+	shutdownTrigger := make(chan struct{})
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		shutdownOnce.Do(func() {
+			log.Info("Stopping replication control plane: canceling active jobs")
+			cancelTasks()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := server.Shutdown(shutdownCtx); err != nil {
+				log.Warn("Graceful replication control plane shutdown timed out: %v", err)
+				_ = server.Close()
+			}
+			cancel()
+			s.mu.Lock()
+			s.shuttingDown = true
+			s.mu.Unlock()
+			s.taskWG.Wait()
+			s.abortActiveSession()
+			log.Info("Replication control plane stopped after task cleanup")
+			close(shutdownDone)
+		})
+	}
 	go func() {
-		<-ctx.Done()
-		s.abortActiveSession()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		select {
+		case <-ctx.Done():
+			shutdown()
+		case <-shutdownTrigger:
+		}
 	}()
 	err = server.ListenAndServe()
+	close(shutdownTrigger)
 	if errors.Is(err, http.ErrServerClosed) {
+		shutdown()
+		<-shutdownDone
 		log.Info("Replication control plane stopped")
 		return nil
 	}
+	shutdown()
+	<-shutdownDone
 	log.Error("Replication control plane failed: %v", err)
 	return err
 }

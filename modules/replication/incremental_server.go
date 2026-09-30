@@ -186,6 +186,11 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		http.Error(w, "replication control plane is stopping", http.StatusServiceUnavailable)
+		return
+	}
 	if s.busy || s.session != nil || s.primaryRecoveryPending {
 		recoveryPending := s.primaryRecoveryPending
 		s.mu.Unlock()
@@ -226,15 +231,19 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 	s.jobs[id] = job
 	acceptedJob := *job
 	s.busy = true
+	s.taskWG.Add(1)
 	s.mu.Unlock()
 	log.Info("Accepted preflight task %s", id)
-	go s.runPreflightTask(id)
+	go func() {
+		defer s.taskWG.Done()
+		s.runPreflightTask(id)
+	}()
 	writeJSONStatus(w, http.StatusAccepted, acceptedJob)
 }
 
 func (s *controlServer) runPreflightTask(id string) {
 	taskStarted := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.SnapshotTimeout)
+	ctx, cancel := context.WithTimeout(s.taskContext(), s.cfg.SnapshotTimeout)
 	defer cancel()
 	base, verifyAll := s.preflightPlan(time.Now().UTC())
 	scanMode, baseID := "incremental", "none"
@@ -309,6 +318,11 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		http.Error(w, "replication control plane is stopping", http.StatusServiceUnavailable)
+		return
+	}
 	if requestID != "" {
 		for _, existing := range s.jobs {
 			if existing.RequestID != requestID {
@@ -356,9 +370,13 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 	s.jobs[id] = job
 	acceptedJob := *job
 	s.busy = true
+	s.taskWG.Add(1)
 	s.mu.Unlock()
 	log.Info("Accepted finalize task %s for preflight base %s", id, baseID)
-	go s.runFinalizeTask(id, baseID, requestID)
+	go func() {
+		defer s.taskWG.Done()
+		s.runFinalizeTask(id, baseID, requestID)
+	}()
 	writeJSONStatus(w, http.StatusAccepted, acceptedJob)
 }
 
@@ -376,7 +394,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 	}
 	log.Info("Finalize task %s starting from preflight %s: base_entries=%d", id, baseID, base.FileCount)
 
-	scanCtx, scanCancel := context.WithTimeout(context.Background(), s.cfg.SnapshotTimeout)
+	scanCtx, scanCancel := context.WithTimeout(s.taskContext(), s.cfg.SnapshotTimeout)
 	fenceStarted := time.Now()
 	fence, err := acquireSnapshotFence(scanCtx)
 	if err == nil {
@@ -391,7 +409,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 	}
 	log.Info("Finalize task %s acquired snapshot fence after %s", id, time.Since(fenceStarted))
 	scanCancel()
-	outageCtx, outageCancel := context.WithTimeout(context.Background(), s.finalSessionTimeout())
+	outageCtx, outageCancel := context.WithTimeout(s.taskContext(), s.finalSessionTimeout())
 	outageStarted := time.Now()
 	checkpointStarted := time.Now()
 	if err := writeFileSynced(primaryOutageCheckpointPath(s.cfg.SnapshotDir), []byte(id), 0o600); err != nil {
