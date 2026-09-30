@@ -889,6 +889,10 @@ func makeTreeRemovable(ctx context.Context, root string) error {
 	})
 }
 
+func stagingPathError(operation, rel string, err error) error {
+	return fmt.Errorf("%s staging path %q: %w", operation, rel, err)
+}
+
 func pruneUnexpectedStageEntries(ctx context.Context, stage string, manifest *SnapshotManifest) error {
 	expected := make(map[string]struct{}, len(manifest.Files))
 	for _, entry := range manifest.Files {
@@ -945,10 +949,10 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	}
 	stageInfo, err := os.Lstat(stage)
 	if err != nil {
-		return err
+		return fmt.Errorf("inspect incremental staging directory %q: %w", stage, err)
 	}
 	if !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
-		return errors.New("incremental staging path must be a real directory")
+		return fmt.Errorf("incremental staging path %q must be a real directory", stage)
 	}
 	if err := pruneUnexpectedStageEntries(ctx, stage, manifest); err != nil {
 		return err
@@ -980,18 +984,18 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 		if err == nil {
 			if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 				if err := os.Chmod(dst, 0o700); err != nil {
-					return err
+					return stagingPathError("make directory writable", entry.Path, err)
 				}
 				continue
 			}
 			if err := os.RemoveAll(dst); err != nil {
-				return err
+				return stagingPathError("remove conflicting directory entry", entry.Path, err)
 			}
 		} else if !os.IsNotExist(err) {
-			return err
+			return stagingPathError("inspect directory", entry.Path, err)
 		}
 		if err := os.Mkdir(dst, 0o700); err != nil {
-			return err
+			return stagingPathError("create directory", entry.Path, err)
 		}
 	}
 	oldEntries := map[string]TreeEntry{}
@@ -1002,7 +1006,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	if previous != nil {
 		resolvedRoot, err = resolvedPath(root)
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve source data root %q: %w", root, err)
 		}
 		for _, entry := range previous.Files {
 			if err := ctx.Err(); err != nil {
@@ -1012,7 +1016,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 		}
 		oldChunks, oldChunkAlternates, err = indexManifestWithAlternatesContext(ctx, previous)
 		if err != nil {
-			return err
+			return fmt.Errorf("index previous manifest chunks: %w", err)
 		}
 	}
 	for _, entry := range manifest.Files {
@@ -1028,10 +1032,10 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 				continue
 			}
 			if err := os.RemoveAll(dst); err != nil {
-				return err
+				return stagingPathError("remove conflicting symlink entry", entry.Path, err)
 			}
 			if err := os.Symlink(entry.LinkTarget, dst); err != nil {
-				return err
+				return stagingPathError("create symlink", entry.Path, err)
 			}
 		case "file":
 			if reusableWholeFile(dst, entry) {
@@ -1058,7 +1062,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 					}
 					if matches {
 						if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-							return err
+							return stagingPathError("create parent directory for reused file", entry.Path, err)
 						}
 						if err := os.Link(source, dst); err == nil {
 							linkedInfo, statErr := os.Lstat(dst)
@@ -1073,20 +1077,20 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 				}
 			}
 			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-				return err
+				return stagingPathError("create parent directory for file", entry.Path, err)
 			}
 			if info, err := os.Lstat(dst); err == nil && info.IsDir() {
 				if err := os.RemoveAll(dst); err != nil {
-					return err
+					return stagingPathError("remove conflicting file entry", entry.Path, err)
 				}
 			} else if err != nil && !os.IsNotExist(err) {
-				return err
+				return stagingPathError("inspect file destination", entry.Path, err)
 			}
 			tmp := dst + ".replication-tmp"
 			_ = os.Remove(tmp)
 			out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(entry.Mode))
 			if err != nil {
-				return err
+				return stagingPathError("create temporary file", entry.Path, err)
 			}
 			for _, chunk := range entry.Chunks {
 				var data []byte
@@ -1114,63 +1118,66 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 					}
 					if err != nil {
 						_ = out.Close()
-						return err
+						return fmt.Errorf("restore staging file %q from chunk %s: %w", entry.Path, chunk.Hash, err)
 					}
 				}
 				if int64(len(data)) != chunk.Size {
 					_ = out.Close()
-					return fmt.Errorf("chunk %s size mismatch", chunk.Hash)
+					return fmt.Errorf("staging file %q chunk %s size mismatch: got %d want %d", entry.Path, chunk.Hash, len(data), chunk.Size)
 				}
 				if _, err := out.Write(data); err != nil {
 					_ = out.Close()
-					return err
+					return stagingPathError("write file data", entry.Path, err)
 				}
 			}
 			if err := out.Chmod(os.FileMode(entry.Mode)); err != nil {
 				_ = out.Close()
-				return err
+				return stagingPathError("restore file permissions", entry.Path, err)
 			}
 			mtime := time.Unix(0, entry.ModTimeNS)
 			if err := os.Chtimes(tmp, mtime, mtime); err != nil {
 				_ = out.Close()
-				return err
+				return stagingPathError("restore file timestamps", entry.Path, err)
 			}
 			if file, err := os.Open(tmp); err == nil {
 				if err := file.Close(); err != nil {
 					_ = out.Close()
-					return err
+					return stagingPathError("close file", entry.Path, err)
 				}
 			} else if os.IsPermission(err) {
 				if err := out.Sync(); err != nil {
 					_ = out.Close()
-					return err
+					return stagingPathError("sync file", entry.Path, err)
 				}
 			} else {
 				_ = out.Close()
-				return err
+				return stagingPathError("open file for sync", entry.Path, err)
 			}
 			if err := out.Close(); err != nil {
-				return err
+				return stagingPathError("close file", entry.Path, err)
 			}
 			if err := os.Rename(tmp, dst); err != nil {
-				return err
+				return stagingPathError("activate temporary file", entry.Path, err)
 			}
 		}
 	}
 	for _, entry := range slices.Backward(directories) {
 		dst := filepath.Join(stage, filepath.FromSlash(entry.Path))
 		if err := os.Chmod(dst, os.FileMode(entry.Mode)); err != nil {
-			return err
+			return stagingPathError("restore directory permissions", entry.Path, err)
 		}
 		mtime := time.Unix(0, entry.ModTimeNS)
 		if err := os.Chtimes(dst, mtime, mtime); err != nil {
-			return err
+			return stagingPathError("restore directory timestamps", entry.Path, err)
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return os.Chmod(stage, os.FileMode(manifest.RootMode))
+	if err := os.Chmod(stage, os.FileMode(manifest.RootMode)); err != nil {
+		return fmt.Errorf("restore staging root permissions: %w", err)
+	}
+	return nil
 }
 
 func persistStandbyManifest(snapshotDir string, manifest *SnapshotManifest) error {
