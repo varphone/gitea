@@ -19,6 +19,10 @@ import (
 )
 
 func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapshot, cfg *config) error {
+	return installPreparedSnapshotWithVerifier(ctx, stage, snapshot, cfg, nil)
+}
+
+func installPreparedSnapshotWithVerifier(ctx context.Context, stage string, snapshot *Snapshot, cfg *config, verifyRestored func() error) error {
 	installStarted := time.Now()
 	log.Info("Validating standby snapshot for installation: snapshot=%s bytes=%d stage=%s", snapshot.ID, snapshot.Size, filepath.Base(stage))
 	root := filepath.Clean(setting.AppWorkPath)
@@ -283,6 +287,14 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 		return rollback(fmt.Errorf("stop verified standby gitea: %w", err))
 	}
 	log.Info("Stopped verified standby service: snapshot=%s duration=%s", snapshot.ID, time.Since(verifiedStopStarted))
+	if verifyRestored != nil {
+		verifyStarted := time.Now()
+		if err := verifyRestored(); err != nil {
+			log.Error("Verify restored standby files after readiness failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(verifyStarted), err)
+			return rollback(fmt.Errorf("verify restored standby files after readiness: %w", err))
+		}
+		log.Info("Verified restored standby files after readiness: snapshot=%s duration=%s", snapshot.ID, time.Since(verifyStarted))
+	}
 
 	// The new service is healthy. The restore process may still have its working
 	// directory in the old root, which became stage after the atomic exchange.
