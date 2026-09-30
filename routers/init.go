@@ -171,7 +171,11 @@ func InitWebInstalled(ctx context.Context) {
 	mustInit(repo_service.InitLicenseClassifier)
 
 	// Finally start up the cron
-	cron.Init(ctx)
+	if replication.IsReplicaReadOnly() {
+		log.Info("Replication replica mode is active; scheduled background tasks are disabled")
+	} else {
+		cron.Init(ctx)
+	}
 }
 
 // NormalRoutes represents non install routes
