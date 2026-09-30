@@ -36,8 +36,13 @@ func baselineManifestPath(dir string) string {
 }
 
 func (s *controlServer) fullScanDue(manifest *SnapshotManifest, now time.Time) bool {
-	return manifest.FullScanAt.IsZero() ||
-		(s.cfg.FullScanInterval > 0 && !now.Before(manifest.FullScanAt.Add(s.cfg.FullScanInterval)))
+	if manifest.FullScanAt.IsZero() {
+		return true
+	}
+	if s.cfg.FullScanInterval <= 0 {
+		return false
+	}
+	return now.Before(manifest.FullScanAt) || !now.Before(manifest.FullScanAt.Add(s.cfg.FullScanInterval))
 }
 
 func (s *controlServer) finalSessionTimeout() time.Duration {
