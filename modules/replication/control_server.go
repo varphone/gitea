@@ -34,13 +34,15 @@ type syncJobRequest struct {
 }
 
 const (
-	syncJobsPath             = "/api/v1/replication/sync-jobs"
-	maxSyncJobRequestSize    = 1 << 20
-	maxConcurrentChunkServes = 8
-	maxChunkSourceAlternates = 2
-	minChunkCompressionSave  = 5
-	maxPooledChunkGzipBuffer = 2 << 20
-	primaryOutageCheckpoint  = ".primary-outage"
+	syncJobsPath              = "/api/v1/replication/sync-jobs"
+	maxSyncJobRequestSize     = 1 << 20
+	maxConcurrentChunkServes  = 8
+	maxChunkSourceAlternates  = 2
+	minChunkCompressionSave   = 5
+	maxPooledChunkGzipBuffer  = 2 << 20
+	chunkCompressionProbeSize = 16 << 10
+	chunkCompressionProbes    = 4
+	primaryOutageCheckpoint   = ".primary-outage"
 )
 
 var chunkGzipBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
@@ -628,7 +630,46 @@ func releaseChunkGzipBuffer(buffer *bytes.Buffer) {
 	}
 }
 
+func chunkCompressionLooksUseful(data []byte) bool {
+	if len(data) <= chunkCompressionProbeSize*chunkCompressionProbes {
+		return true
+	}
+	// Probe separated ranges to avoid a full gzip pass over incompressible chunks.
+	probe := chunkGzipBuffers.Get().(*bytes.Buffer)
+	probe.Reset()
+	writer, err := gzip.NewWriterLevel(probe, gzip.BestSpeed)
+	if err != nil {
+		releaseChunkGzipBuffer(probe)
+		return true
+	}
+	for i := range chunkCompressionProbes {
+		if i > 0 {
+			probe.Reset()
+			writer.Reset(probe)
+		}
+		start := (len(data) - chunkCompressionProbeSize) * i / (chunkCompressionProbes - 1)
+		if _, err := writer.Write(data[start : start+chunkCompressionProbeSize]); err != nil {
+			_ = writer.Close()
+			releaseChunkGzipBuffer(probe)
+			return true
+		}
+		if err := writer.Close(); err != nil {
+			releaseChunkGzipBuffer(probe)
+			return true
+		}
+		if probe.Len() < chunkCompressionProbeSize {
+			releaseChunkGzipBuffer(probe)
+			return true
+		}
+	}
+	releaseChunkGzipBuffer(probe)
+	return false
+}
+
 func gzipChunk(data []byte) (*bytes.Buffer, bool) {
+	if !chunkCompressionLooksUseful(data) {
+		return nil, false
+	}
 	compressed := chunkGzipBuffers.Get().(*bytes.Buffer)
 	compressed.Reset()
 	writer, err := gzip.NewWriterLevel(compressed, gzip.BestSpeed)
