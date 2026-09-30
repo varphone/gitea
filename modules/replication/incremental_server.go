@@ -249,6 +249,7 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 		manifest, err := loadTrustedManifest(manifestPath(s.cfg.SnapshotDir, resumeID), s.cfg.ControlToken, "preflight")
 		s.mu.Unlock()
 		if err != nil {
+			log.Warn("Reject preflight recovery checkpoint %s: %v", resumeID, err)
 			http.Error(w, "preflight recovery checkpoint is unavailable or invalid", http.StatusConflict)
 			return
 		}

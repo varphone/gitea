@@ -462,6 +462,7 @@ func (s *controlServer) syncTask(w http.ResponseWriter, r *http.Request) {
 		}
 		manifest, err := loadTrustedManifest(manifestPath(s.cfg.SnapshotDir, id), s.cfg.ControlToken, job.State)
 		if err != nil {
+			log.Warn("Cannot load trusted replication manifest for request: snapshot=%s state=%s error=%v", id, job.State, err)
 			http.NotFound(w, r)
 			return
 		}
