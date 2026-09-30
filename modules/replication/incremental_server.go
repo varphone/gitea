@@ -221,11 +221,12 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 	id := time.Now().UTC().Format(snapshotIDLayout)
 	job := &Snapshot{ID: id, State: snapshotStateCreating, CreatedAt: time.Now().UTC()}
 	s.jobs[id] = job
+	acceptedJob := *job
 	s.busy = true
 	s.mu.Unlock()
 	log.Info("Accepted preflight task %s", id)
 	go s.runPreflightTask(id)
-	writeJSONStatus(w, http.StatusAccepted, job)
+	writeJSONStatus(w, http.StatusAccepted, acceptedJob)
 }
 
 func (s *controlServer) runPreflightTask(id string) {
@@ -350,11 +351,12 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 	id := time.Now().UTC().Format(snapshotIDLayout)
 	job := &Snapshot{ID: id, State: snapshotStateCreating, CreatedAt: time.Now().UTC(), RequestID: requestID, BaseJobID: baseID}
 	s.jobs[id] = job
+	acceptedJob := *job
 	s.busy = true
 	s.mu.Unlock()
 	log.Info("Accepted finalize task %s for preflight base %s", id, baseID)
 	go s.runFinalizeTask(id, baseID, requestID)
-	writeJSONStatus(w, http.StatusAccepted, job)
+	writeJSONStatus(w, http.StatusAccepted, acceptedJob)
 }
 
 func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
