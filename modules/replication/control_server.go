@@ -539,7 +539,7 @@ func (s *controlServer) setTaskManifest(manifest *SnapshotManifest) {
 }
 
 func isReplicationTemporaryFile(name string) bool {
-	if strings.HasPrefix(name, "..install-stage.checkpoint.tmp-") {
+	if strings.HasPrefix(name, "..install-stage.checkpoint.tmp-") || strings.HasPrefix(name, ".primary-outage.tmp-") {
 		return true
 	}
 	for _, base := range []string{"baseline.json", "current.json"} {
