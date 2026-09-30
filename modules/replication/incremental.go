@@ -249,9 +249,12 @@ func scanPathError(rel string, err error) error {
 
 func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *SnapshotManifest, verifyAll bool) (*SnapshotManifest, error) {
 	scanStarted := time.Now()
-	rootInfo, err := os.Stat(root)
+	rootInfo, err := os.Lstat(root)
 	if err != nil {
 		return nil, err
+	}
+	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("APP_WORK_PATH must be a real directory")
 	}
 	m := &SnapshotManifest{
 		FormatVersion: incrementalFormatVersion, GiteaVersion: setting.AppVer,

@@ -207,12 +207,26 @@ func validateAtomicLayout(snapshotDir string) error {
 	if err != nil {
 		return fmt.Errorf("resolve APP_WORK_PATH: %w", err)
 	}
+	rootPath, err := filepath.Abs(filepath.Clean(setting.AppWorkPath))
+	if err != nil {
+		return fmt.Errorf("resolve APP_WORK_PATH path: %w", err)
+	}
+	if root != rootPath {
+		return errors.New("APP_WORK_PATH must not contain symlink components for atomic exchange")
+	}
 	if filepath.Dir(root) == root {
 		return errors.New("APP_WORK_PATH must not be the filesystem root")
 	}
 	resolvedSnapshotDir, err := resolvedPath(snapshotDir)
 	if err != nil {
 		return fmt.Errorf("resolve SNAPSHOT_DIR: %w", err)
+	}
+	snapshotPath, err := filepath.Abs(filepath.Clean(snapshotDir))
+	if err != nil {
+		return fmt.Errorf("resolve SNAPSHOT_DIR path: %w", err)
+	}
+	if resolvedSnapshotDir != snapshotPath {
+		return errors.New("SNAPSHOT_DIR must not contain symlink components for atomic exchange")
 	}
 	if isWithin(root, resolvedSnapshotDir) {
 		return fmt.Errorf("SNAPSHOT_DIR %q must be outside APP_WORK_PATH %q", snapshotDir, root)
