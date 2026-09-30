@@ -482,7 +482,25 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 
 	log.Info("Finalize task %s stopped primary after %s", id, time.Since(stopStarted))
 	finalScanStarted := time.Now()
-	manifest, err := scanIncrementalTreeWithOptionsForTask(outageCtx, s.root(), base, false, id)
+	var manifest *SnapshotManifest
+finalScanAttempts:
+	for attempt := 1; attempt <= 5; attempt++ {
+		manifest, err = scanIncrementalTreeWithOptionsForTask(outageCtx, s.root(), base, false, id)
+		if err == nil || !errors.Is(err, errIncrementalTreeChanged) {
+			break
+		}
+		if attempt == 5 {
+			log.Warn("Finalize task %s final scan still found changing files on final attempt=%d/5: %v", id, attempt, err)
+			break
+		}
+		log.Warn("Finalize task %s final scan found changing files; retrying while primary remains stopped attempt=%d/5 error=%v", id, attempt+1, err)
+		select {
+		case <-outageCtx.Done():
+			err = outageCtx.Err()
+			break finalScanAttempts
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 	if err != nil {
 		s.recoverPrimary()
 		err = releaseFinalizeFence(id, fence, err)
