@@ -46,10 +46,18 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	}
 	stageOwned := true
 	defer func() {
-		if stageOwned {
-			if err := os.RemoveAll(stage); err != nil {
-				log.Warn("Remove failed standby install stage: snapshot=%s stage=%s error=%v", snapshot.ID, filepath.Base(stage), err)
+		if !stageOwned {
+			return
+		}
+		if _, err := os.Lstat(stage); err != nil {
+			if !os.IsNotExist(err) {
+				log.Warn("Inspect failed standby install stage: snapshot=%s stage=%s error=%v", snapshot.ID, filepath.Base(stage), err)
 			}
+			return
+		}
+		cleanupErr := errors.Join(makeTreeRemovable(context.Background(), stage), os.RemoveAll(stage))
+		if cleanupErr != nil {
+			log.Warn("Remove failed standby install stage: snapshot=%s stage=%s error=%v", snapshot.ID, filepath.Base(stage), cleanupErr)
 		}
 	}()
 	if snapshot.RootMode == 0 || snapshot.RootMode > 0o777 {
