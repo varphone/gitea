@@ -48,6 +48,35 @@ var syncBusyRetryDelay = time.Second
 
 var errRemoteSnapshotUnavailable = errors.New("remote snapshot is unavailable")
 
+func startPeriodicProgressLog(interval time.Duration, logProgress func()) func() {
+	done := make(chan struct{})
+	var worker sync.WaitGroup
+	worker.Go(func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				select {
+				case <-done:
+					return
+				default:
+					logProgress()
+				}
+			}
+		}
+	})
+	var stop sync.Once
+	return func() {
+		stop.Do(func() {
+			close(done)
+			worker.Wait()
+		})
+	}
+}
+
 type chunkChangedError struct {
 	hash   string
 	status string
@@ -1372,8 +1401,19 @@ func setLocalChangeID(entry *TreeEntry, info os.FileInfo) bool {
 }
 
 func recordLocalChangeIDs(root string, manifest *SnapshotManifest) {
-	recorded, skipped := 0, 0
+	filesTotal := 0
+	for _, entry := range manifest.Files {
+		if entry.Type == "file" {
+			filesTotal++
+		}
+	}
+	var filesProcessed, recorded, skipped atomic.Int64
 	var firstSkip error
+	started := time.Now()
+	stopProgress := startPeriodicProgressLog(30*time.Second, func() {
+		log.Info("Recording standby file identities progress: snapshot=%s files_processed=%d/%d recorded=%d skipped=%d elapsed=%s", manifest.ID, filesProcessed.Load(), filesTotal, recorded.Load(), skipped.Load(), time.Since(started))
+	})
+	defer stopProgress()
 	for i := range manifest.Files {
 		entry := &manifest.Files[i]
 		entry.LocalChangeID = ""
@@ -1382,7 +1422,8 @@ func recordLocalChangeIDs(root string, manifest *SnapshotManifest) {
 		}
 		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(entry.Path)))
 		if err == nil && setLocalChangeID(entry, info) {
-			recorded++
+			recorded.Add(1)
+			filesProcessed.Add(1)
 			continue
 		} else if err == nil {
 			if info.Mode().IsRegular() && info.Size() == entry.Size &&
@@ -1392,15 +1433,17 @@ func recordLocalChangeIDs(root string, manifest *SnapshotManifest) {
 				err = errors.New("local file metadata does not match the restored manifest")
 			}
 		}
-		skipped++
+		skipped.Add(1)
+		filesProcessed.Add(1)
 		if firstSkip == nil {
 			firstSkip = fmt.Errorf("%s: %w", entry.Path, err)
 		}
 	}
-	if skipped > 0 {
-		log.Warn("Could not record local file identities for some files: snapshot=%s recorded=%d skipped=%d first_error=%v", manifest.ID, recorded, skipped, firstSkip)
+	stopProgress()
+	if skipped.Load() > 0 {
+		log.Warn("Could not record local file identities for some files: snapshot=%s recorded=%d skipped=%d first_error=%v duration=%s", manifest.ID, recorded.Load(), skipped.Load(), firstSkip, time.Since(started))
 	} else {
-		log.Info("Recorded local file identities: snapshot=%s files=%d", manifest.ID, recorded)
+		log.Info("Recorded local file identities: snapshot=%s files=%d duration=%s", manifest.ID, recorded.Load(), time.Since(started))
 	}
 }
 
@@ -1412,7 +1455,18 @@ func verifyRestoredFileIdentities(ctx context.Context, root string, manifest *Sn
 			localPaths[filepath.ToSlash(rel)] = struct{}{}
 		}
 	}
-	identityMatches, contentChecks, localIdentities := 0, 0, 0
+	filesTotal := 0
+	for _, entry := range manifest.Files {
+		if entry.Type == "file" {
+			filesTotal++
+		}
+	}
+	var filesChecked, identityMatches, contentChecks, localIdentities atomic.Int64
+	started := time.Now()
+	stopProgress := startPeriodicProgressLog(30*time.Second, func() {
+		log.Info("Standby readiness file verification progress: snapshot=%s files_checked=%d/%d identity_matches=%d content_hashed=%d local_identities=%d elapsed=%s", manifest.ID, filesChecked.Load(), filesTotal, identityMatches.Load(), contentChecks.Load(), localIdentities.Load(), time.Since(started))
+	})
+	defer stopProgress()
 	for i := range manifest.Files {
 		entry := &manifest.Files[i]
 		if err := ctx.Err(); err != nil {
@@ -1425,8 +1479,9 @@ func verifyRestoredFileIdentities(ctx context.Context, root string, manifest *Sn
 		if _, isLocal := localPaths[entry.Path]; isLocal {
 			info, _ := reusableWholeFileInfo(path, *entry)
 			if setLocalChangeID(entry, info) {
-				localIdentities++
+				localIdentities.Add(1)
 			}
+			filesChecked.Add(1)
 			continue
 		}
 		info, reusable := reusableWholeFileInfo(path, *entry)
@@ -1435,7 +1490,8 @@ func verifyRestoredFileIdentities(ctx context.Context, root string, manifest *Sn
 		}
 		localID := fileChangeID(info)
 		if entry.LocalChangeID != "" && entry.LocalChangeID == localID {
-			identityMatches++
+			identityMatches.Add(1)
+			filesChecked.Add(1)
 			continue
 		}
 		matches, verifiedInfo, err := fileMatchesManifestChunksWithInfo(ctx, path, *entry)
@@ -1446,9 +1502,11 @@ func verifyRestoredFileIdentities(ctx context.Context, root string, manifest *Sn
 			return fmt.Errorf("restored file content changed during standby readiness: %s", entry.Path)
 		}
 		setLocalChangeID(entry, verifiedInfo)
-		contentChecks++
+		contentChecks.Add(1)
+		filesChecked.Add(1)
 	}
-	log.Info("Verified restored standby files after readiness: snapshot=%s identity_matches=%d content_hashed=%d local_identities=%d", manifest.ID, identityMatches, contentChecks, localIdentities)
+	stopProgress()
+	log.Info("Verified restored standby files after readiness: snapshot=%s identity_matches=%d content_hashed=%d local_identities=%d duration=%s", manifest.ID, identityMatches.Load(), contentChecks.Load(), localIdentities.Load(), time.Since(started))
 	return nil
 }
 
@@ -1607,29 +1665,9 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 		}
 	}
 	var progressFilesStarted, progressFilesCompleted, progressChunksWritten, progressPayloadBytes atomic.Int64
-	progressDone := make(chan struct{})
-	var progressWorkers sync.WaitGroup
-	progressWorkers.Go(func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-progressDone:
-				return
-			case <-ticker.C:
-				log.Info("Incremental staging progress: snapshot=%s files_started=%d files_completed=%d/%d chunks_written=%d chunk_payload_bytes_written=%d elapsed=%s", manifest.ID, progressFilesStarted.Load(), progressFilesCompleted.Load(), fileCount, progressChunksWritten.Load(), progressPayloadBytes.Load(), time.Since(stageStarted))
-			}
-		}
+	stopProgress := startPeriodicProgressLog(30*time.Second, func() {
+		log.Info("Incremental staging progress: snapshot=%s files_started=%d files_completed=%d/%d chunks_written=%d chunk_payload_bytes_written=%d elapsed=%s", manifest.ID, progressFilesStarted.Load(), progressFilesCompleted.Load(), fileCount, progressChunksWritten.Load(), progressPayloadBytes.Load(), time.Since(stageStarted))
 	})
-	progressStopped := false
-	stopProgress := func() {
-		if progressStopped {
-			return
-		}
-		close(progressDone)
-		progressWorkers.Wait()
-		progressStopped = true
-	}
 	defer stopProgress()
 	captureIdentity := func(entryIndex int, info os.FileInfo) {
 		if setLocalChangeID(&manifest.Files[entryIndex], info) {
