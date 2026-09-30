@@ -248,6 +248,10 @@ func scanPathError(rel string, err error) error {
 }
 
 func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *SnapshotManifest, verifyAll bool) (*SnapshotManifest, error) {
+	return scanIncrementalTreeWithOptionsForTask(ctx, root, base, verifyAll, "local")
+}
+
+func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, base *SnapshotManifest, verifyAll bool, snapshotID string) (*SnapshotManifest, error) {
 	scanStarted := time.Now()
 	rootInfo, err := os.Lstat(root)
 	if err != nil {
@@ -280,7 +284,7 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 			case <-progressDone:
 				return
 			case <-ticker.C:
-				log.Info("Replication tree scan progress: entries_seen=%d files_seen=%d files_completed=%d reused_files=%d chunked_files=%d logical_file_bytes_seen=%d content_bytes_chunked=%d verify_all=%t elapsed=%s", entriesSeen.Load(), filesSeen.Load(), filesCompleted.Load(), filesReused.Load(), filesChunked.Load(), logicalFileBytesSeen.Load(), contentBytesChunked.Load(), verifyAll, time.Since(scanStarted))
+				log.Info("Replication tree scan progress: snapshot=%s entries_seen=%d files_seen=%d files_completed=%d reused_files=%d chunked_files=%d logical_file_bytes_seen=%d content_bytes_chunked=%d verify_all=%t elapsed=%s", snapshotID, entriesSeen.Load(), filesSeen.Load(), filesCompleted.Load(), filesReused.Load(), filesChunked.Load(), logicalFileBytesSeen.Load(), contentBytesChunked.Load(), verifyAll, time.Since(scanStarted))
 			}
 		}
 	})

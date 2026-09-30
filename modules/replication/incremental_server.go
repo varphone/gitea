@@ -250,7 +250,7 @@ func (s *controlServer) runPreflightTask(id string) {
 	var err error
 scanAttempts:
 	for attempt := 1; attempt <= 5; attempt++ {
-		manifest, err = scanIncrementalTreeWithOptions(ctx, s.root(), base, verifyAll)
+		manifest, err = scanIncrementalTreeWithOptionsForTask(ctx, s.root(), base, verifyAll, id)
 		if err == nil || !errors.Is(err, errIncrementalTreeChanged) {
 			break
 		}
@@ -417,7 +417,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 
 	log.Info("Finalize task %s stopped primary after %s", id, time.Since(stopStarted))
 	finalScanStarted := time.Now()
-	manifest, err := scanIncrementalTreeWithBase(outageCtx, s.root(), base)
+	manifest, err := scanIncrementalTreeWithOptionsForTask(outageCtx, s.root(), base, false, id)
 	if err != nil {
 		s.recoverPrimary()
 		err = releaseFinalizeFence(id, fence, err)
