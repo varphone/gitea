@@ -357,10 +357,10 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 	scanStarted := time.Now()
 	rootInfo, err := os.Lstat(root)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("inspect replication root %q: %w", root, err)
 	}
 	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("APP_WORK_PATH must be a real directory")
+		return nil, fmt.Errorf("APP_WORK_PATH %q must be a real directory", root)
 	}
 	m := &SnapshotManifest{
 		FormatVersion: incrementalFormatVersion, GiteaVersion: setting.AppVer,
@@ -435,12 +435,12 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 				return scanPathError(rel, err)
 			}
 			if err := validateTreeLink(rel, e.LinkTarget); err != nil {
-				return err
+				return scanPathError(rel, err)
 			}
 		case info.Mode().IsRegular():
 			e.Type, e.Size = "file", info.Size()
 			if m.Size > math.MaxInt64-e.Size {
-				return errors.New("manifest logical size overflow")
+				return fmt.Errorf("manifest logical size overflow at %q", rel)
 			}
 			filesSeen.Add(1)
 			logicalFileBytesSeen.Add(e.Size)
@@ -687,7 +687,7 @@ func validateIncrementalManifest(m *SnapshotManifest) error {
 				return fmt.Errorf("invalid symlink fields in %q", e.Path)
 			}
 			if err := validateTreeLink(e.Path, e.LinkTarget); err != nil {
-				return err
+				return fmt.Errorf("invalid symlink %q: %w", e.Path, err)
 			}
 		case "file":
 			if e.LinkTarget != "" {
@@ -711,7 +711,7 @@ func validateIncrementalManifest(m *SnapshotManifest) error {
 				return fmt.Errorf("invalid file size in %q", e.Path)
 			}
 			if logicalSize > math.MaxInt64-e.Size {
-				return errors.New("manifest logical size overflow")
+				return fmt.Errorf("manifest logical size overflow at %q", e.Path)
 			}
 			logicalSize += e.Size
 		default:
