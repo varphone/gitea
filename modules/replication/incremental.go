@@ -667,6 +667,49 @@ func readChunkFromRoot(root, resolvedRoot string, loc chunkLocation, expected st
 
 func cachePath(cacheDir, hash string) string { return filepath.Join(cacheDir, hash[:2], hash) }
 
+func isLowerHex(value string) bool {
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return value != ""
+}
+
+func ensureRealDirectory(path string) error {
+	if err := os.Mkdir(path, 0o700); err != nil && !os.IsExist(err) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("replication chunk cache path %q must be a real directory", path)
+	}
+	return nil
+}
+
+func prepareChunkCache(cacheDir string) error {
+	if err := ensureRealDirectory(cacheDir); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if len(name) != 2 || !isLowerHex(name) {
+			continue
+		}
+		if err := ensureRealDirectory(filepath.Join(cacheDir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func storeChunk(cacheDir, hash string, data []byte) error {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != hash {
@@ -674,7 +717,10 @@ func storeChunk(cacheDir, hash string, data []byte) error {
 	}
 	path := cachePath(cacheDir, hash)
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ensureRealDirectory(cacheDir); err != nil {
+		return err
+	}
+	if err := ensureRealDirectory(dir); err != nil {
 		return err
 	}
 	if info, err := os.Lstat(path); err == nil {

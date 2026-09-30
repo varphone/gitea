@@ -1431,7 +1431,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 		}
 	}
 	cacheDir := filepath.Join(cfg.SnapshotDir, ".chunks")
-	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+	if err := prepareChunkCache(cacheDir); err != nil {
 		return err
 	}
 	if resumed, err := resumeFinalSync(ctx, cfg, base, client, previous, cacheDir, stage); resumed {
