@@ -32,12 +32,14 @@ import (
 // pushQueue represents a queue to handle update pull request tests
 var pushQueue *queue.WorkerPoolQueue[[]*repo_module.PushUpdateOptions]
 
-func initPushQueue() error {
+func initPushQueue(runWorker bool) error {
 	pushQueue = queue.CreateSimpleQueue(graceful.GetManager().ShutdownContext(), "push_update", pushQueueHandler)
 	if pushQueue == nil {
 		return errors.New("unable to create push_update queue")
 	}
-	go graceful.GetManager().RunWithCancel(pushQueue)
+	if runWorker {
+		go graceful.GetManager().RunWithCancel(pushQueue)
+	}
 	return nil
 }
 

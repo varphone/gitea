@@ -678,12 +678,14 @@ func addRepoToBranchSyncQueue(repoID int64) error {
 	})
 }
 
-func initBranchSyncQueue(ctx context.Context) error {
+func initBranchSyncQueue(ctx context.Context, runWorker bool) error {
 	branchSyncQueue = queue.CreateUniqueQueue(ctx, "branch_sync", handlerBranchSync)
 	if branchSyncQueue == nil {
 		return errors.New("unable to create branch_sync queue")
 	}
-	go graceful.GetManager().RunWithCancel(branchSyncQueue)
+	if runWorker {
+		go graceful.GetManager().RunWithCancel(branchSyncQueue)
+	}
 
 	return nil
 }

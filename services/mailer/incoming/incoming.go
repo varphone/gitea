@@ -14,6 +14,7 @@ import (
 
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/process"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/services/mailer/token"
 
@@ -23,7 +24,7 @@ import (
 )
 
 func Init(ctx context.Context) error {
-	if !setting.IncomingEmail.Enabled {
+	if !setting.IncomingEmail.Enabled || replication.IsReplicaReadOnly() {
 		return nil
 	}
 	go func() {

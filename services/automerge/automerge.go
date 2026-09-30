@@ -23,6 +23,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/process"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/services/automergequeue"
 	notify_service "gitea.dev/services/notify"
 	pull_service "gitea.dev/services/pull"
@@ -37,7 +38,9 @@ func Init() error {
 	if automergequeue.AutoMergeQueue == nil {
 		return errors.New("unable to create pr_auto_merge queue")
 	}
-	go graceful.GetManager().RunWithCancel(automergequeue.AutoMergeQueue)
+	if !replication.IsReplicaReadOnly() {
+		go graceful.GetManager().RunWithCancel(automergequeue.AutoMergeQueue)
+	}
 	return nil
 }
 

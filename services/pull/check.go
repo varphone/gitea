@@ -27,6 +27,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/process"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/timeutil"
 	asymkey_service "gitea.dev/services/asymkey"
@@ -529,7 +530,9 @@ func Init() error {
 		return errors.New("unable to create pr_patch_checker queue")
 	}
 
-	go graceful.GetManager().RunWithCancel(prPatchCheckerQueue)
-	go graceful.GetManager().RunWithShutdownContext(InitializePullRequests)
+	if !replication.IsReplicaReadOnly() {
+		go graceful.GetManager().RunWithCancel(prPatchCheckerQueue)
+		go graceful.GetManager().RunWithShutdownContext(InitializePullRequests)
+	}
 	return nil
 }

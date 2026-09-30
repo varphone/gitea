@@ -28,6 +28,7 @@ import (
 	"gitea.dev/modules/process"
 	"gitea.dev/modules/proxy"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/timeutil"
 	"gitea.dev/modules/util"
@@ -322,9 +323,10 @@ func Init() error {
 	if hookQueue == nil {
 		return errors.New("unable to create webhook_sender queue")
 	}
-	go graceful.GetManager().RunWithCancel(hookQueue)
-
-	go graceful.GetManager().RunWithShutdownContext(populateWebhookSendingQueue)
+	if !replication.IsReplicaReadOnly() {
+		go graceful.GetManager().RunWithCancel(hookQueue)
+		go graceful.GetManager().RunWithShutdownContext(populateWebhookSendingQueue)
+	}
 
 	return nil
 }

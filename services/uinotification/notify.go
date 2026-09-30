@@ -15,6 +15,7 @@ import (
 	"gitea.dev/modules/graceful"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	notify_service "gitea.dev/services/notify"
 )
 
@@ -60,6 +61,9 @@ func handler(items ...issueNotificationOpts) []issueNotificationOpts {
 }
 
 func (ns *notificationService) Run() {
+	if replication.IsReplicaReadOnly() {
+		return
+	}
 	go graceful.GetManager().RunWithCancel(ns.issueQueue) // TODO: using "go" here doesn't seem right, just leave it as old code
 }
 

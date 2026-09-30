@@ -7,6 +7,7 @@ import (
 	"gitea.dev/modules/graceful"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 )
 
@@ -44,7 +45,9 @@ func StartSyncMirrors() {
 	if mirrorQueue == nil {
 		log.Fatal("Unable to create mirror queue")
 	}
-	go graceful.GetManager().RunWithCancel(mirrorQueue)
+	if !replication.IsReplicaReadOnly() {
+		go graceful.GetManager().RunWithCancel(mirrorQueue)
+	}
 }
 
 // AddPullMirrorToQueue adds repoID to mirror queue

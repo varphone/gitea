@@ -16,6 +16,7 @@ import (
 	"gitea.dev/modules/log"
 	base "gitea.dev/modules/migration"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/secret"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/structs"
@@ -43,7 +44,9 @@ func Init() error {
 	if taskQueue == nil {
 		return errors.New("unable to create task queue")
 	}
-	go graceful.GetManager().RunWithCancel(taskQueue)
+	if !replication.IsReplicaReadOnly() {
+		go graceful.GetManager().RunWithCancel(taskQueue)
+	}
 	return nil
 }
 

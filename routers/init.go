@@ -172,7 +172,7 @@ func InitWebInstalled(ctx context.Context) {
 
 	// Finally start up the cron
 	if replication.IsReplicaReadOnly() {
-		log.Info("Replication replica mode is active; scheduled background tasks are disabled")
+		log.Info("Replication replica mode is active; mutation-capable background workers and scheduled tasks are paused")
 	} else {
 		cron.Init(ctx)
 	}
