@@ -411,6 +411,13 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 		entriesSeen.Add(1)
 		rel = filepath.ToSlash(rel)
 		if kind, exclude := excludedPaths[rel]; exclude && info.IsDir() {
+			current, err := os.Lstat(path)
+			if err != nil {
+				return scanPathError(rel, err)
+			}
+			if !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, current) {
+				return fmt.Errorf("%w: %s", errIncrementalTreeChanged, rel)
+			}
 			log.Info("Excluded regenerable data from replication snapshot: snapshot=%s kind=%s path=%s", snapshotID, kind, rel)
 			return filepath.SkipDir
 		}
