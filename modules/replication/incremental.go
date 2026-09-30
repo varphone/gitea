@@ -27,13 +27,14 @@ import (
 )
 
 const (
-	incrementalFormatVersion = 2
-	chunkMinSize             = 256 << 10
-	chunkAverageSize         = 1 << 20
-	chunkMaxSize             = 4 << 20
-	maxManifestSymlinkDepth  = 40
-	maxManifestSize          = 256 << 20
-	manifestEncodeBatchSize  = 1 << 20
+	incrementalFormatVersion       = 2
+	chunkMinSize                   = 256 << 10
+	chunkAverageSize               = 1 << 20
+	chunkMaxSize                   = 4 << 20
+	minimumChunkDescriptorJSONSize = 95
+	maxManifestSymlinkDepth        = 40
+	maxManifestSize                = 256 << 20
+	manifestEncodeBatchSize        = 1 << 20
 )
 
 var (
@@ -107,7 +108,12 @@ func splitFile(ctx context.Context, path string) ([]ChunkDescriptor, error) {
 	var chunks []ChunkDescriptor
 	var rolling uint64
 	var offset, start, size int64
+	tooLarge := false
 	flush := func() {
+		if int64(len(chunks)) >= int64(maxManifestSize)/minimumChunkDescriptorJSONSize {
+			tooLarge = true
+			return
+		}
 		chunks = append(chunks, ChunkDescriptor{hex.EncodeToString(hash.Sum(nil)), start, size})
 		hash.Reset()
 		rolling, start, size = 0, offset, 0
@@ -125,6 +131,9 @@ func splitFile(ctx context.Context, path string) ([]ChunkDescriptor, error) {
 			if size >= chunkMinSize && ((rolling&uint64(chunkAverageSize-1)) == 0 || size >= chunkMaxSize) {
 				_, _ = hash.Write(buffer[segmentStart : i+1])
 				flush()
+				if tooLarge {
+					return nil, errManifestTooLarge
+				}
 				segmentStart = i + 1
 			}
 		}
@@ -140,6 +149,9 @@ func splitFile(ctx context.Context, path string) ([]ChunkDescriptor, error) {
 	}
 	if size > 0 {
 		flush()
+		if tooLarge {
+			return nil, errManifestTooLarge
+		}
 	}
 	return chunks, nil
 }
@@ -390,6 +402,16 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 			baseEntries[entry.Path] = entry
 		}
 	}
+	var manifestSizeLowerBound int64
+	appendManifestEntry := func(entry TreeEntry) error {
+		entrySize := treeEntryEncodedSizeLowerBound(&entry)
+		if entrySize > int64(maxManifestSize)-manifestSizeLowerBound {
+			return errManifestTooLarge
+		}
+		manifestSizeLowerBound += entrySize
+		m.Files = append(m.Files, entry)
+		return nil
+	}
 	directories := []scannedDirectory{{path: root, rel: ".", info: rootInfo}}
 	excludedPaths := replicationTreeExclusions(root)
 	var entriesSeen, filesSeen, filesCompleted, filesReused, filesChunked, logicalFileBytesSeen, contentBytesChunked atomic.Int64
@@ -487,7 +509,9 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 				}
 				e.Chunks = old.Chunks
 				m.Size += e.Size
-				m.Files = append(m.Files, e)
+				if err := appendManifestEntry(e); err != nil {
+					return err
+				}
 				filesCompleted.Add(1)
 				filesReused.Add(1)
 				return nil
@@ -514,8 +538,7 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 		default:
 			return fmt.Errorf("unsupported filesystem entry %q", rel)
 		}
-		m.Files = append(m.Files, e)
-		return nil
+		return appendManifestEntry(e)
 	})
 	if err != nil {
 		return nil, err
@@ -579,7 +602,7 @@ func treeEntryEncodedSizeLowerBound(entry *TreeEntry) int64 {
 		size += int64(len(`,"local_change_id":""`))
 	}
 	for _, chunk := range entry.Chunks {
-		chunkSize := int64(32 + len(chunk.Hash))
+		chunkSize := int64(31 + len(chunk.Hash))
 		if chunkSize > int64(maxManifestSize)-size {
 			return int64(maxManifestSize) + 1
 		}
