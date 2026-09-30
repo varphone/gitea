@@ -44,6 +44,8 @@ const (
 
 var syncBusyRetryDelay = time.Second
 
+var errRemoteSnapshotUnavailable = errors.New("remote snapshot is unavailable")
+
 type chunkChangedError struct {
 	hash   string
 	status string
@@ -355,6 +357,9 @@ func requestSnapshotStatus(ctx context.Context, client *http.Client, base, token
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: %s", errRemoteSnapshotUnavailable, id)
+		}
 		return nil, responseStatusError("snapshot "+id, resp)
 	}
 	var snapshot Snapshot
@@ -1484,6 +1489,10 @@ func resumeFinalSync(ctx context.Context, cfg *config, base string, client *http
 	}
 	status, err := requestSnapshotStatus(ctx, client, base, cfg.ControlToken, final.ID)
 	if err != nil {
+		if errors.Is(err, errRemoteSnapshotUnavailable) {
+			log.Info("Remote final sync checkpoint is unavailable: snapshot=%s; starting a new sync", final.ID)
+			return false, nil
+		}
 		log.Error("Cannot check remote status for final sync checkpoint: snapshot=%s error=%v", final.ID, err)
 		return true, err
 	}
