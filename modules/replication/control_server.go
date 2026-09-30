@@ -40,9 +40,38 @@ const (
 	maxChunkSourceAlternates = 2
 	minChunkCompressionSave  = 5
 	maxPooledChunkGzipBuffer = 2 << 20
+	primaryOutageCheckpoint  = ".primary-outage"
 )
 
 var chunkGzipBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+func primaryOutageCheckpointPath(snapshotDir string) string {
+	return filepath.Join(snapshotDir, primaryOutageCheckpoint)
+}
+
+func primaryOutageCheckpointExists(snapshotDir string) bool {
+	path := primaryOutageCheckpointPath(snapshotDir)
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true
+	}
+	if !os.IsNotExist(err) {
+		log.Warn("Cannot inspect primary outage recovery checkpoint %s: %v", path, err)
+		return true
+	}
+	return false
+}
+
+func clearPrimaryOutageCheckpoint(snapshotDir string) error {
+	path := primaryOutageCheckpointPath(snapshotDir)
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return syncDirectory(snapshotDir)
+}
 
 func validReplicationRequestID(id string) bool {
 	if len(id) != 32 {
@@ -124,7 +153,7 @@ func ServeControl(ctx context.Context) error {
 		return fmt.Errorf("resolve replication data root: %w", err)
 	}
 	removeLegacyArchives(cfg.SnapshotDir)
-	primaryRecoveryRequired := transferCheckpointFound
+	primaryRecoveryRequired := transferCheckpointFound || primaryOutageCheckpointExists(cfg.SnapshotDir)
 	for id, job := range jobs {
 		switch job.State {
 		case "ready", "preflight":

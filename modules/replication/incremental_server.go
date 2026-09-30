@@ -122,6 +122,9 @@ func (s *controlServer) startPrimary() error {
 	if err := readinessCheck(ctx, s.cfg.GiteaServiceName); err != nil {
 		return fmt.Errorf("wait for primary service %s readiness: %w", s.cfg.GiteaServiceName, err)
 	}
+	if err := clearPrimaryOutageCheckpoint(s.cfg.SnapshotDir); err != nil {
+		log.Warn("Clear primary outage recovery checkpoint after service readiness failed: %v", err)
+	}
 	return nil
 }
 
@@ -390,6 +393,15 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 	scanCancel()
 	outageCtx, outageCancel := context.WithTimeout(context.Background(), s.finalSessionTimeout())
 	outageStarted := time.Now()
+	checkpointStarted := time.Now()
+	if err := writeFileSynced(primaryOutageCheckpointPath(s.cfg.SnapshotDir), []byte(id), 0o600); err != nil {
+		err = releaseFinalizeFence(id, fence, err)
+		outageCancel()
+		log.Error("Finalize task %s could not persist primary outage recovery checkpoint after %s: %v", id, time.Since(checkpointStarted), err)
+		s.failAsyncJob(id, err)
+		return
+	}
+	log.Info("Persisted primary outage recovery checkpoint: snapshot=%s duration=%s", id, time.Since(checkpointStarted))
 	stopStarted := time.Now()
 	stopAttempted := true
 	if err = systemctl(outageCtx, "stop", s.cfg.GiteaServiceName); err != nil {
