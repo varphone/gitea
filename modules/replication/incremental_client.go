@@ -269,12 +269,6 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 	for attempt := 1; ; attempt++ {
 		resp, err := doRetryableJSONRequest(ctx, client, http.MethodPost, base+syncJobsPath, token, operation, payload)
 		if err != nil {
-			if attempt < requestRetryLimit && shouldRetryRequestError(err) {
-				if retryErr := waitForRetry(ctx, attempt, operation, err); retryErr != nil {
-					return nil, retryErr
-				}
-				continue
-			}
 			return nil, err
 		}
 		if resp.StatusCode == http.StatusAccepted {
