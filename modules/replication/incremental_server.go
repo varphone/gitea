@@ -139,11 +139,16 @@ func (s *controlServer) retryPrimaryStart() {
 	s.mu.Unlock()
 	log.Warn("Primary Gitea recovery is pending; new replication jobs are blocked")
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.SnapshotTimeout)
-		defer cancel()
+		ctx := s.taskContext()
 		attempt := 0
 		lastFailureLog := time.Time{}
 		for {
+			select {
+			case <-ctx.Done():
+				log.Warn("Automatic primary Gitea recovery stopped with the replication control plane; outage checkpoint remains for the next startup: %v", ctx.Err())
+				return
+			default:
+			}
 			attempt++
 			started := time.Now()
 			if err := s.startPrimary(); err == nil {
@@ -162,7 +167,7 @@ func (s *controlServer) retryPrimaryStart() {
 			}
 			select {
 			case <-ctx.Done():
-				log.Error("Automatic primary Gitea recovery timed out; replication jobs remain blocked: %v", ctx.Err())
+				log.Warn("Automatic primary Gitea recovery stopped with the replication control plane; outage checkpoint remains for the next startup: %v", ctx.Err())
 				return
 			case <-time.After(5 * time.Second):
 			}

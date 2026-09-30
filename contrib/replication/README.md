@@ -64,7 +64,9 @@ Chunk boundaries average 1 MiB, with 256 KiB minimum and 4 MiB maximum.
 Content-defined boundaries allow later chunks to be reused after insertions.
 A final session is automatically aborted and the primary restarted when
 `FINAL_SESSION_TIMEOUT` expires or the control service stops. `SNAPSHOT_TIMEOUT`
-bounds manifest scans and does not extend the primary outage.
+bounds manifest scans and does not limit primary recovery retries. If starting the
+primary fails, recovery retries until it succeeds or the control service stops;
+the persisted outage checkpoint lets the next startup continue recovery.
 
 ## Control API
 
