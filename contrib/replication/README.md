@@ -138,10 +138,10 @@ timer only on the standby:
 
 ```sh
 install -d -o git -g git -m 0700 /var/lib/gitea /var/lib/gitea-replication/snapshots
-install -m 0644 contrib/systemd/gitea-replication.service \
-  contrib/systemd/gitea-replication-switch.service \
-  contrib/systemd/gitea-replication-restore.service \
-  contrib/systemd/gitea-replication-restore.timer /etc/systemd/system/
+install -m 0644 contrib/service/systemd/gitea-replication.service \
+  contrib/service/systemd/gitea-replication-switch.service \
+  contrib/service/systemd/gitea-replication-restore.service \
+  contrib/service/systemd/gitea-replication-restore.timer /etc/systemd/system/
 install -m 0644 contrib/polkit/60-gitea-replication.rules /etc/polkit-1/rules.d/
 systemctl daemon-reload
 systemctl enable --now gitea-replication.service
