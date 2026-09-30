@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -526,7 +527,29 @@ func (s *controlServer) getTaskChunkLocation(id, hash string) (chunkLocation, bo
 func (s *controlServer) getTaskChunkAlternates(id, hash string) []chunkLocation {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.taskChunkAlternates[id][hash]
+	alternates := append([]chunkLocation(nil), s.taskChunkAlternates[id][hash]...)
+	primary, hasPrimary := s.taskChunkIndexes[id][hash]
+	if !hasPrimary {
+		if baseID := s.taskChunkIndexFallbacks[id]; baseID != "" {
+			primary, hasPrimary = s.taskChunkIndexes[baseID][hash]
+		}
+	}
+	appendAlternate := func(candidate chunkLocation) {
+		if candidate.Path == "" || (hasPrimary && candidate == primary) {
+			return
+		}
+		if slices.Contains(alternates, candidate) {
+			return
+		}
+		alternates = append(alternates, candidate)
+	}
+	if baseID := s.taskChunkIndexFallbacks[id]; baseID != "" {
+		appendAlternate(s.taskChunkIndexes[baseID][hash])
+		for _, candidate := range s.taskChunkAlternates[baseID][hash] {
+			appendAlternate(candidate)
+		}
+	}
+	return alternates
 }
 
 func (s *controlServer) tryAcquireChunkSlot() (chan struct{}, bool) {
