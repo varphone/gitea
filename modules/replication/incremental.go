@@ -1147,11 +1147,32 @@ func loadManifestFile(path string) (*SnapshotManifest, error) {
 	if err := validateIncrementalManifest(&m); err != nil {
 		return nil, err
 	}
+	if err := validateManifestPathID(path, m.ID); err != nil {
+		return nil, err
+	}
 	return &m, nil
 }
 
 func loadTrustedManifest(path, token, state string) (*SnapshotManifest, error) {
 	return loadTrustedManifestStates(path, token, state)
+}
+
+func validateManifestPathID(path, manifestID string) error {
+	name := filepath.Base(path)
+	if name == baselineManifestName || name == "current.json" {
+		return nil
+	}
+	fileID, ok := strings.CutSuffix(name, ".json")
+	if !ok {
+		return nil
+	}
+	if !validSnapshotID(fileID) {
+		return fmt.Errorf("manifest file name %q does not contain a valid snapshot ID", name)
+	}
+	if fileID == manifestID {
+		return nil
+	}
+	return fmt.Errorf("manifest ID %q does not match file name %q", manifestID, name)
 }
 
 func loadTrustedManifestStates(path, token string, states ...string) (*SnapshotManifest, error) {
