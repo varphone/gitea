@@ -247,6 +247,106 @@ func scanPathError(rel string, err error) error {
 	return fmt.Errorf("scan %q: %w", rel, err)
 }
 
+func replicationTreeExclusions(root string) map[string]string {
+	type candidate struct {
+		path string
+		kind string
+	}
+	candidates := make([]candidate, 0, 3)
+	if setting.Indexer.IssueType == "bleve" {
+		candidates = append(candidates, candidate{path: setting.Indexer.IssuePath, kind: "issue index"})
+	}
+	if setting.Indexer.RepoIndexerEnabled && setting.Indexer.RepoType == "bleve" {
+		candidates = append(candidates, candidate{path: setting.Indexer.RepoPath, kind: "code index"})
+	}
+	if setting.RepoArchive.Storage != nil && setting.RepoArchive.Storage.Type == setting.LocalStorageType {
+		candidates = append(candidates, candidate{path: setting.RepoArchive.Storage.Path, kind: "repository archive cache"})
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	root, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return nil
+	}
+	appWorkPath, err := filepath.Abs(filepath.Clean(setting.AppWorkPath))
+	if err != nil || appWorkPath != root {
+		return nil
+	}
+	resolvedRoot, err := resolvedPath(root)
+	if err != nil || resolvedRoot != root {
+		return nil
+	}
+	protectedPaths := []string{setting.Database.Path, setting.RepoRootPath, setting.CustomPath}
+	for _, storage := range []*setting.Storage{
+		setting.Attachment.Storage, setting.LFS.Storage, setting.Avatar.Storage,
+		setting.RepoAvatar.Storage, setting.Packages.Storage,
+		setting.Actions.LogStorage, setting.Actions.ArtifactStorage,
+	} {
+		if storage != nil {
+			protectedPaths = append(protectedPaths, storage.Path)
+		}
+	}
+
+	paths := make([]string, len(candidates))
+	eligible := make([]bool, len(candidates))
+	for i, candidate := range candidates {
+		if candidate.path == "" || !filepath.IsAbs(candidate.path) {
+			continue
+		}
+		candidatePath, err := filepath.Abs(filepath.Clean(candidate.path))
+		if err != nil || candidatePath == root || !isWithin(root, candidatePath) {
+			continue
+		}
+		resolvedCandidate, resolveErr := resolvedPath(candidatePath)
+		if resolveErr != nil || resolvedCandidate != candidatePath {
+			continue
+		}
+		unsafe := false
+		for _, protected := range protectedPaths {
+			if protected == "" {
+				continue
+			}
+			if !filepath.IsAbs(protected) {
+				protected = filepath.Join(root, protected)
+			}
+			resolvedProtected, resolveErr := resolvedPath(protected)
+			if resolveErr != nil || isWithin(candidatePath, resolvedProtected) || isWithin(resolvedProtected, candidatePath) {
+				unsafe = true
+				break
+			}
+		}
+		if unsafe {
+			continue
+		}
+		paths[i] = candidatePath
+		eligible[i] = true
+	}
+
+	excluded := make(map[string]string, len(candidates))
+	for i, candidate := range candidates {
+		if !eligible[i] {
+			continue
+		}
+		overlaps := false
+		for j := range candidates {
+			if i != j && eligible[j] && (isWithin(paths[i], paths[j]) || isWithin(paths[j], paths[i])) {
+				overlaps = true
+				break
+			}
+		}
+		if overlaps {
+			continue
+		}
+		rel, err := filepath.Rel(root, paths[i])
+		if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			excluded[filepath.ToSlash(rel)] = candidate.kind
+		}
+	}
+	return excluded
+}
+
 func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *SnapshotManifest, verifyAll bool) (*SnapshotManifest, error) {
 	return scanIncrementalTreeWithOptionsForTask(ctx, root, base, verifyAll, "local")
 }
@@ -273,6 +373,7 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 			baseEntries[entry.Path] = entry
 		}
 	}
+	excludedPaths := replicationTreeExclusions(root)
 	var entriesSeen, filesSeen, filesCompleted, filesReused, filesChunked, logicalFileBytesSeen, contentBytesChunked atomic.Int64
 	progressDone := make(chan struct{})
 	var progressWorkers sync.WaitGroup
@@ -309,6 +410,10 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 		}
 		entriesSeen.Add(1)
 		rel = filepath.ToSlash(rel)
+		if kind, exclude := excludedPaths[rel]; exclude && info.IsDir() {
+			log.Info("Excluded regenerable data from replication snapshot: snapshot=%s kind=%s path=%s", snapshotID, kind, rel)
+			return filepath.SkipDir
+		}
 		e := TreeEntry{Path: rel, Mode: uint32(info.Mode().Perm())}
 		switch {
 		case info.IsDir():
