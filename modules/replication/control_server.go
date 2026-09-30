@@ -509,14 +509,15 @@ func requestAcceptsGzip(r *http.Request) bool {
 	for _, header := range r.Header.Values("Accept-Encoding") {
 		for item := range strings.SplitSeq(header, ",") {
 			encoding, parameters, _ := strings.Cut(strings.TrimSpace(item), ";")
+			encoding = strings.TrimSpace(encoding)
 			quality := 1.0
 			valid := true
 			for parameter := range strings.SplitSeq(parameters, ";") {
 				name, value, ok := strings.Cut(strings.TrimSpace(parameter), "=")
-				if !ok || !strings.EqualFold(name, "q") {
+				if !ok || !strings.EqualFold(strings.TrimSpace(name), "q") {
 					continue
 				}
-				parsed, err := strconv.ParseFloat(value, 64)
+				parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 				if err != nil || parsed < 0 || parsed > 1 {
 					valid = false
 					break
