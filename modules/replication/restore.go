@@ -170,7 +170,9 @@ func ControlStatus(ctx context.Context) ([]*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/replication/sync-jobs", nil)
+	statusCtx, cancel := context.WithTimeout(ctx, responseBodyIdleTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(statusCtx, http.MethodGet, base+"/api/v1/replication/sync-jobs", nil)
 	if err != nil {
 		return nil, err
 	}
