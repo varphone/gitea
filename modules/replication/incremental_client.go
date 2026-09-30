@@ -848,6 +848,21 @@ func fileMatchesManifestChunks(ctx context.Context, path string, entry TreeEntry
 	return sameChunks(chunks, entry.Chunks), nil
 }
 
+func makeStageTreeRemovable(ctx context.Context, root string) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return nil
+	})
+}
+
 func pruneUnexpectedStageEntries(ctx context.Context, stage string, manifest *SnapshotManifest) error {
 	expected := make(map[string]struct{}, len(manifest.Files))
 	for _, entry := range manifest.Files {
@@ -871,8 +886,8 @@ func pruneUnexpectedStageEntries(ctx context.Context, stage string, manifest *Sn
 		rel = filepath.ToSlash(rel)
 		if _, ok := expected[rel]; !ok {
 			if info.IsDir() {
-				if err := os.Chmod(path, 0o700); err != nil {
-					return fmt.Errorf("make unexpected staging directory %q removable: %w", rel, err)
+				if err := makeStageTreeRemovable(ctx, path); err != nil {
+					return fmt.Errorf("make unexpected staging tree %q removable: %w", rel, err)
 				}
 			}
 			if err := os.RemoveAll(path); err != nil {
