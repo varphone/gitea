@@ -89,6 +89,10 @@ func loadManifests(dir, token string) (map[string]*Snapshot, bool, error) {
 	result := make(map[string]*Snapshot, len(paths))
 	transferCheckpointFound := false
 	for _, path := range paths {
+		fileID := strings.TrimSuffix(filepath.Base(path), ".json")
+		if !validSnapshotID(fileID) {
+			continue
+		}
 		data, err := readManifestData(path)
 		if err != nil {
 			log.Warn("Skip oversized or unreadable snapshot manifest %s: %v", path, err)
@@ -99,8 +103,7 @@ func loadManifests(dir, token string) (map[string]*Snapshot, bool, error) {
 			State string `json:"state"`
 		}
 		_ = json.Unmarshal(data, &transferHint)
-		if transferHint.State == "transferring" && validSnapshotID(transferHint.ID) &&
-			strings.TrimSuffix(filepath.Base(path), ".json") == transferHint.ID {
+		if transferHint.State == "transferring" && transferHint.ID == fileID {
 			transferCheckpointFound = true
 		}
 		var manifest SnapshotManifest
@@ -108,7 +111,7 @@ func loadManifests(dir, token string) (map[string]*Snapshot, bool, error) {
 			log.Warn("Skip invalid snapshot manifest %s: %v", path, err)
 			continue
 		}
-		if manifest.FormatVersion != incrementalFormatVersion || !validSnapshotID(manifest.ID) || strings.TrimSuffix(filepath.Base(path), ".json") != manifest.ID {
+		if manifest.FormatVersion != incrementalFormatVersion || manifest.ID != fileID {
 			continue
 		}
 		if err := validateIncrementalManifest(&manifest); err != nil {
