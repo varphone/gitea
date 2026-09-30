@@ -680,6 +680,9 @@ func finishRemoteSession(ctx context.Context, client *http.Client, base, token, 
 func previousManifest(path, token string) *SnapshotManifest {
 	manifest, err := loadTrustedManifest(path, token, "ready")
 	if err == nil {
+		if recovered := recoverCheckpointedReadyManifest(path, token, manifest); recovered != nil {
+			return recovered
+		}
 		return manifest
 	}
 	if !errors.Is(err, errManifestTrailingData) {
@@ -708,6 +711,46 @@ func previousManifest(path, token string) *SnapshotManifest {
 		return manifest
 	}
 	return nil
+}
+
+func recoverCheckpointedReadyManifest(currentPath, token string, current *SnapshotManifest) *SnapshotManifest {
+	snapshotDir := filepath.Dir(currentPath)
+	checkpointPath := filepath.Join(snapshotDir, stageCheckpointName)
+	checkpoint, err := readStageCheckpoint(checkpointPath)
+	if err != nil || !validSnapshotID(checkpoint.SnapshotID) || len(checkpoint.ManifestSHA) != sha256.Size*2 || !isLowerHex(checkpoint.ManifestSHA) {
+		return nil
+	}
+	ready, err := loadTrustedManifest(manifestPath(snapshotDir, checkpoint.SnapshotID), token, "ready")
+	if err != nil || !matchesStageCheckpoint(ready, checkpoint) {
+		return nil
+	}
+	if current.ID != ready.ID || current.SHA256 != ready.SHA256 {
+		log.Warn("Recover completed standby baseline from installation checkpoint: snapshot=%s current=%s", ready.ID, current.ID)
+		if err := writeManifestAt(currentPath, ready); err != nil {
+			log.Warn("Could not update current standby baseline from installation checkpoint: snapshot=%s error=%v", ready.ID, err)
+			return ready
+		}
+		log.Info("Recovered current standby baseline from completed installation: snapshot=%s", ready.ID)
+	}
+	if err := os.Remove(checkpointPath); err != nil && !os.IsNotExist(err) {
+		log.Warn("Remove recovered standby installation checkpoint: snapshot=%s error=%v", ready.ID, err)
+	}
+	return ready
+}
+
+func matchesStageCheckpoint(ready *SnapshotManifest, checkpoint stageCheckpoint) bool {
+	if ready == nil || ready.ID != checkpoint.SnapshotID || ready.State != "ready" {
+		return false
+	}
+	transfer := *ready
+	transfer.Snapshot.State = "transferring"
+	transfer.Snapshot.Error = ""
+	transfer.Files = append([]TreeEntry(nil), ready.Files...)
+	for i := range transfer.Files {
+		transfer.Files[i].LocalChangeID = ""
+	}
+	digest, err := manifestDigest(&transfer)
+	return err == nil && digest == checkpoint.ManifestSHA
 }
 
 func latestTrustedReadyManifest(snapshotDir, token string) *SnapshotManifest {
@@ -1912,10 +1955,13 @@ type stageCheckpoint struct {
 	ManifestSHA string `json:"manifest_sha"`
 }
 
-const maxStageCheckpointSize = 4 << 10
+const (
+	maxStageCheckpointSize = 4 << 10
+	stageCheckpointName    = ".install-stage.checkpoint"
+)
 
 func stageCheckpointPath(cfg *config) string {
-	return filepath.Join(cfg.SnapshotDir, ".install-stage.checkpoint")
+	return filepath.Join(cfg.SnapshotDir, stageCheckpointName)
 }
 
 func readStageCheckpoint(path string) (stageCheckpoint, error) {
