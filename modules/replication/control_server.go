@@ -156,6 +156,20 @@ func ServeControl(ctx context.Context) error {
 	if err := validateAtomicLayout(cfg.SnapshotDir); err != nil {
 		return err
 	}
+	var startupRestoreLock *restoreRunLock
+	if cfg.Mode == modeReplica {
+		startupRestoreLock, err = acquireControlStartupRestoreLock(ctx, cfg.SnapshotDir)
+		if err != nil {
+			return fmt.Errorf("wait for standby restore before loading replication manifests: %w", err)
+		}
+		defer func() {
+			if startupRestoreLock != nil {
+				if err := startupRestoreLock.Release(); err != nil {
+					log.Error("Release standby restore lock after control startup failed: %v", err)
+				}
+			}
+		}()
+	}
 	taskCtx, cancelTasks := context.WithCancel(context.Background())
 	defer cancelTasks()
 	jobs, transferCheckpointFound, err := loadManifests(cfg.SnapshotDir, cfg.ControlToken)
@@ -227,6 +241,13 @@ func ServeControl(ctx context.Context) error {
 	if primaryRecoveryRequired {
 		log.Warn("Recovering primary Gitea after a possible interrupted final replication session")
 		s.recoverPrimary()
+	}
+	if startupRestoreLock != nil {
+		lock := startupRestoreLock
+		startupRestoreLock = nil
+		if err := lock.Release(); err != nil {
+			return fmt.Errorf("release standby restore lock after control startup: %w", err)
+		}
 	}
 	log.Info("Starting replication control plane: mode=%s listen=%s snapshot_dir=%s persisted_jobs=%d", cfg.Mode, cfg.ControlListen, cfg.SnapshotDir, len(jobs))
 	mux := http.NewServeMux()

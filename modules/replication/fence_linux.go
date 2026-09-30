@@ -56,6 +56,29 @@ func acquireRestoreRunLock(snapshotDir string) (*restoreRunLock, error) {
 	return &restoreRunLock{file: file}, nil
 }
 
+func acquireControlStartupRestoreLock(ctx context.Context, snapshotDir string) (*restoreRunLock, error) {
+	waitStarted := time.Now()
+	loggedWait := false
+	for {
+		lock, err := acquireRestoreRunLock(snapshotDir)
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, errRestoreAlreadyRunning) {
+			return nil, err
+		}
+		if !loggedWait && time.Since(waitStarted) >= 5*time.Second {
+			log.Info("Waiting for active standby restore before loading replication manifests: elapsed=%s", time.Since(waitStarted))
+			loggedWait = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 func (l *restoreRunLock) Release() error {
 	if l == nil || l.file == nil {
 		return nil

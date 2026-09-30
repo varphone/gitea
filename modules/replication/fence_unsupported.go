@@ -22,6 +22,10 @@ func acquireRestoreRunLock(string) (*restoreRunLock, error) {
 	return nil, errors.New("disaster-recovery restore locking requires Linux")
 }
 
+func acquireControlStartupRestoreLock(context.Context, string) (*restoreRunLock, error) {
+	return nil, nil
+}
+
 func (*restoreRunLock) Release() error { return nil }
 
 func AcquireSnapshotFence(context.Context) (*WriteFence, error) {
