@@ -505,7 +505,9 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 		job = &Snapshot{ID: manifest.ID, CreatedAt: manifest.CreatedAt}
 		s.jobs[manifest.ID] = job
 	}
+	jobRequestID, jobBaseID := job.RequestID, job.BaseJobID
 	*job = manifest.Snapshot
+	job.RequestID, job.BaseJobID = jobRequestID, jobBaseID
 	s.busy = false
 	s.mu.Unlock()
 	log.Info("Finalize task %s prepared transfer session %s: primary_outage=%s remaining_budget=%s total_duration=%s", id, manifest.ID, time.Since(outageStarted), time.Until(deadline), time.Since(taskStarted))
