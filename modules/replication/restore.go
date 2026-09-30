@@ -156,17 +156,29 @@ func EnsurePrimaryService(ctx context.Context) error {
 	if cfg.Mode != modePrimary {
 		return nil
 	}
+	started := time.Now()
+	log.Info("Ensuring primary Gitea service is running: service=%s", cfg.GiteaServiceName)
 	taskCtx, cancel := context.WithTimeout(ctx, cfg.ServiceTimeout)
 	defer cancel()
 	if err := systemctl(taskCtx, "start", cfg.GiteaServiceName); err != nil {
-		return err
+		wrappedErr := fmt.Errorf("start primary service %s: %w", cfg.GiteaServiceName, err)
+		log.Error("Ensure primary Gitea service failed: service=%s duration=%s error=%v", cfg.GiteaServiceName, time.Since(started), wrappedErr)
+		return wrappedErr
 	}
+	readinessStarted := time.Now()
 	if err := readinessCheck(taskCtx, cfg.GiteaServiceName); err != nil {
-		return fmt.Errorf("wait for primary service %s readiness: %w", cfg.GiteaServiceName, err)
+		wrappedErr := fmt.Errorf("wait for primary service %s readiness: %w", cfg.GiteaServiceName, err)
+		log.Error("Ensure primary Gitea readiness failed: service=%s duration=%s total_duration=%s error=%v", cfg.GiteaServiceName, time.Since(readinessStarted), time.Since(started), wrappedErr)
+		return wrappedErr
 	}
+	readinessDuration := time.Since(readinessStarted)
+	checkpointStarted := time.Now()
 	if err := clearPrimaryOutageCheckpoint(cfg.SnapshotDir); err != nil {
-		return fmt.Errorf("clear primary outage recovery checkpoint: %w", err)
+		wrappedErr := fmt.Errorf("clear primary outage recovery checkpoint: %w", err)
+		log.Error("Ensure primary Gitea checkpoint cleanup failed: service=%s duration=%s total_duration=%s error=%v", cfg.GiteaServiceName, time.Since(checkpointStarted), time.Since(started), wrappedErr)
+		return wrappedErr
 	}
+	log.Info("Ensured primary Gitea service is ready: service=%s readiness_duration=%s checkpoint_cleanup_duration=%s total_duration=%s", cfg.GiteaServiceName, readinessDuration, time.Since(checkpointStarted), time.Since(started))
 	return nil
 }
 
