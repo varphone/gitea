@@ -617,12 +617,9 @@ func cachedChunkAvailable(cacheDir, hash string, size int64) bool {
 	return err == nil && info.Mode().IsRegular() && info.Size() == size
 }
 
-func pruneChunkCache(ctx context.Context, cacheDir, snapshotID string, manifests ...*SnapshotManifest) error {
+func pruneChunkCache(ctx context.Context, cacheDir, snapshotID string, manifest *SnapshotManifest) error {
 	keep := make(map[string]int64)
-	for _, manifest := range manifests {
-		if manifest == nil {
-			continue
-		}
+	if manifest != nil {
 		for _, entry := range manifest.Files {
 			for _, chunk := range entry.Chunks {
 				if err := ctx.Err(); err != nil {
@@ -1552,7 +1549,7 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 			cancel()
 		}
 	}()
-	if err := pruneChunkCache(ctx, cacheDir, final.ID, previous, final); err != nil {
+	if err := pruneChunkCache(ctx, cacheDir, final.ID, final); err != nil {
 		return fmt.Errorf("prune stale replication chunk cache: %w", err)
 	}
 	chunkPassStarted := time.Now()
@@ -1748,7 +1745,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 		}
 		pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention, cfg.ControlToken)
 		log.Info("Received preflight manifest %s with %d entries and %s of content", preflight.ID, preflight.FileCount, strconv.FormatInt(preflight.Size, 10))
-		if err := pruneChunkCache(ctx, cacheDir, preflight.ID, previous, preflight); err != nil {
+		if err := pruneChunkCache(ctx, cacheDir, preflight.ID, preflight); err != nil {
 			return fmt.Errorf("prune stale replication chunk cache: %w", err)
 		}
 		if err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, preflight, previous, cacheDir, true); err != nil {

@@ -17,8 +17,8 @@ outside this root is rejected.
 Git, LFS, or attachment data. On the standby it also contains a temporary
 content-addressed chunk cache while a synchronization is in progress. Verified
 chunks survive an interrupted run for resumption. Before each preflight and
-final chunk transfer, stale chunks outside the previous baseline and current
-target manifest are pruned; the cache is removed after a successful atomic installation.
+final chunk transfer, stale chunks outside the current target manifest are
+pruned; the cache is removed after a successful atomic installation.
 On the standby, `SNAPSHOT_DIR` and
 `APP_WORK_PATH` must be on the same local filesystem.
 
