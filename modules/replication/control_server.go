@@ -37,6 +37,7 @@ const (
 	syncJobsPath              = "/api/v1/replication/sync-jobs"
 	maxSyncJobRequestSize     = 1 << 20
 	maxConcurrentChunkServes  = 8
+	maxTransientFailedJobs    = 64
 	maxChunkSourceAlternates  = 2
 	minChunkCompressionSave   = 5
 	maxPooledChunkGzipBuffer  = 2 << 20
@@ -88,15 +89,16 @@ func validReplicationRequestID(id string) bool {
 }
 
 type Snapshot struct {
-	ID        string    `json:"id"`
-	State     string    `json:"state"`
-	CreatedAt time.Time `json:"created_at"`
-	Size      int64     `json:"size,omitempty"`
-	SHA256    string    `json:"sha256,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	RootMode  uint32    `json:"root_mode"`
-	RequestID string    `json:"-"`
-	BaseJobID string    `json:"-"`
+	ID               string    `json:"id"`
+	State            string    `json:"state"`
+	CreatedAt        time.Time `json:"created_at"`
+	Size             int64     `json:"size,omitempty"`
+	SHA256           string    `json:"sha256,omitempty"`
+	Error            string    `json:"error,omitempty"`
+	RootMode         uint32    `json:"root_mode"`
+	RequestID        string    `json:"-"`
+	BaseJobID        string    `json:"-"`
+	transientFailure bool
 }
 
 const snapshotStateCreating = "creating"

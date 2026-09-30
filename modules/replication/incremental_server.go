@@ -497,7 +497,6 @@ func releaseFinalizeFence(id string, fence *WriteFence, cause error) error {
 
 func (s *controlServer) failAsyncJob(id string, err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	job := s.jobs[id]
 	if job == nil {
 		job = &Snapshot{ID: id, CreatedAt: time.Now().UTC()}
@@ -505,7 +504,47 @@ func (s *controlServer) failAsyncJob(id string, err error) {
 	}
 	job.State = "failed"
 	job.Error = err.Error()
+	job.transientFailure = true
 	s.busy = false
+	pruned := s.pruneTransientFailedJobsLocked(id)
+	s.mu.Unlock()
+	if pruned > 0 {
+		log.Info("Pruned old failed replication job history: removed=%d retained_limit=%d", pruned, maxTransientFailedJobs)
+	}
+}
+
+func (s *controlServer) pruneTransientFailedJobsLocked(preserveID string) int {
+	failedIDs := make([]string, 0)
+	for id, job := range s.jobs {
+		if job.State == "failed" && job.transientFailure {
+			failedIDs = append(failedIDs, id)
+		}
+	}
+	if len(failedIDs) <= maxTransientFailedJobs {
+		return 0
+	}
+	sort.Slice(failedIDs, func(i, j int) bool {
+		left, right := s.jobs[failedIDs[i]], s.jobs[failedIDs[j]]
+		if left.CreatedAt.Equal(right.CreatedAt) {
+			return failedIDs[i] < failedIDs[j]
+		}
+		return left.CreatedAt.Before(right.CreatedAt)
+	})
+	pruned := 0
+	for _, id := range failedIDs {
+		if len(failedIDs)-pruned <= maxTransientFailedJobs {
+			break
+		}
+		if id == preserveID {
+			continue
+		}
+		delete(s.jobs, id)
+		delete(s.taskManifests, id)
+		delete(s.taskChunkIndexes, id)
+		delete(s.taskChunkAlternates, id)
+		pruned++
+	}
+	return pruned
 }
 
 func (s *controlServer) completeAsyncJob(id string, snapshot Snapshot) {
