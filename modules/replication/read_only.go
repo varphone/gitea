@@ -76,9 +76,17 @@ func isReplicaReadOnlySafePost(request *http.Request) bool {
 		path = strings.TrimPrefix(path, subURL)
 	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 3 && parts[0] != "" && parts[1] != "" {
-		// Git smart HTTP uses POST for fetch and archive reads.
-		return parts[2] == "git-upload-pack" || parts[2] == "git-upload-archive"
+	if len(parts) == 3 {
+		if parts[0] == "login" && parts[1] == "oauth" {
+			return parts[2] == "userinfo" || parts[2] == "introspect"
+		}
+		if parts[0] != "" && parts[1] != "" {
+			// Git smart HTTP uses POST for fetch and archive reads.
+			return parts[2] == "git-upload-pack" || parts[2] == "git-upload-archive"
+		}
+	}
+	if len(parts) >= 4 && parts[0] != "" && parts[1] != "" && parts[2] == "_preview" {
+		return true
 	}
 	if len(parts) != 6 || parts[0] == "" || parts[1] == "" ||
 		parts[2] != "info" || parts[3] != "lfs" || parts[4] != "objects" || parts[5] != "batch" {
