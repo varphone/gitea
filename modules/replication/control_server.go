@@ -41,7 +41,7 @@ const (
 	minChunkCompressionSave   = 5
 	maxPooledChunkGzipBuffer  = 2 << 20
 	chunkCompressionProbeSize = 16 << 10
-	chunkCompressionProbes    = 4
+	chunkCompressionProbes    = 8
 	primaryOutageCheckpoint   = ".primary-outage"
 )
 
