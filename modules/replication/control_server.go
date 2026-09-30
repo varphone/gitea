@@ -107,22 +107,23 @@ type Snapshot struct {
 const snapshotStateCreating = "creating"
 
 type controlServer struct {
-	cfg                    *config
-	taskCtx                context.Context
-	taskWG                 sync.WaitGroup
-	mu                     sync.RWMutex
-	chunkMu                sync.RWMutex
-	jobs                   map[string]*Snapshot
-	taskManifests          map[string]*SnapshotManifest
-	taskChunkIndexes       map[string]map[string]chunkLocation
-	busy                   bool
-	shuttingDown           bool
-	primaryRecoveryPending bool
-	session                *finalSyncSession
-	dataRoot               string
-	resolvedRoot           string
-	chunkSlots             chan struct{}
-	taskChunkAlternates    map[string]map[string][]chunkLocation
+	cfg                     *config
+	taskCtx                 context.Context
+	taskWG                  sync.WaitGroup
+	mu                      sync.RWMutex
+	chunkMu                 sync.RWMutex
+	jobs                    map[string]*Snapshot
+	taskManifests           map[string]*SnapshotManifest
+	taskChunkIndexes        map[string]map[string]chunkLocation
+	taskChunkIndexFallbacks map[string]string
+	busy                    bool
+	shuttingDown            bool
+	primaryRecoveryPending  bool
+	session                 *finalSyncSession
+	dataRoot                string
+	resolvedRoot            string
+	chunkSlots              chan struct{}
+	taskChunkAlternates     map[string]map[string][]chunkLocation
 }
 
 func (s *controlServer) root() string {
@@ -178,8 +179,9 @@ func ServeControl(ctx context.Context) error {
 	}
 	s := &controlServer{
 		cfg: cfg, taskCtx: taskCtx, jobs: jobs, taskManifests: map[string]*SnapshotManifest{},
-		taskChunkIndexes: map[string]map[string]chunkLocation{}, taskChunkAlternates: map[string]map[string][]chunkLocation{},
-		chunkSlots: make(chan struct{}, maxConcurrentChunkServes),
+		taskChunkIndexes: map[string]map[string]chunkLocation{}, taskChunkIndexFallbacks: map[string]string{},
+		taskChunkAlternates: map[string]map[string][]chunkLocation{},
+		chunkSlots:          make(chan struct{}, maxConcurrentChunkServes),
 	}
 	s.resolvedRoot, err = resolvedPath(s.root())
 	if err != nil {
@@ -487,6 +489,7 @@ func (s *controlServer) prune() {
 			delete(s.jobs, id)
 			delete(s.taskManifests, id)
 			delete(s.taskChunkIndexes, id)
+			delete(s.taskChunkIndexFallbacks, id)
 			delete(s.taskChunkAlternates, id)
 		}
 	}
@@ -508,6 +511,15 @@ func (s *controlServer) getTaskChunkLocation(id, hash string) (chunkLocation, bo
 	defer s.mu.RUnlock()
 	index, indexed := s.taskChunkIndexes[id]
 	location, ok := index[hash]
+	if !ok {
+		if baseID := s.taskChunkIndexFallbacks[id]; baseID != "" {
+			baseIndex, baseIndexed := s.taskChunkIndexes[baseID]
+			if baseIndexed {
+				location, ok = baseIndex[hash]
+				indexed = true
+			}
+		}
+	}
 	return location, ok, indexed
 }
 
@@ -531,10 +543,12 @@ func (s *controlServer) tryAcquireChunkSlot() (chan struct{}, bool) {
 	}
 }
 
-func (s *controlServer) setTaskManifest(ctx context.Context, manifest *SnapshotManifest) error {
+func (s *controlServer) setTaskManifest(ctx context.Context, manifest *SnapshotManifest, baseManifestID string) error {
 	manifestCopy := *manifest
 	var index map[string]chunkLocation
 	var alternates map[string][]chunkLocation
+	indexFallbackID := ""
+	indexKind := "full"
 	indexed := false
 	indexStarted := time.Now()
 	switch manifestCopy.State {
@@ -546,8 +560,17 @@ func (s *controlServer) setTaskManifest(ctx context.Context, manifest *SnapshotM
 		}
 		indexed = true
 	case "transferring":
+		s.mu.RLock()
+		baseIndex, hasBaseIndex := s.taskChunkIndexes[baseManifestID]
+		s.mu.RUnlock()
 		var err error
-		index, err = indexManifestContext(ctx, &manifestCopy)
+		if baseManifestID != "" && hasBaseIndex {
+			index, err = indexManifestDeltaContext(ctx, &manifestCopy, baseIndex)
+			indexFallbackID = baseManifestID
+			indexKind = "delta"
+		} else {
+			index, err = indexManifestContext(ctx, &manifestCopy)
+		}
 		if err != nil {
 			return fmt.Errorf("index transferring manifest %s: %w", manifest.ID, err)
 		}
@@ -567,10 +590,19 @@ func (s *controlServer) setTaskManifest(ctx context.Context, manifest *SnapshotM
 	if s.taskChunkIndexes == nil {
 		s.taskChunkIndexes = map[string]map[string]chunkLocation{}
 	}
+	if s.taskChunkIndexFallbacks == nil {
+		s.taskChunkIndexFallbacks = map[string]string{}
+	}
 	if indexed {
 		s.taskChunkIndexes[manifest.ID] = index
+		if indexFallbackID != "" {
+			s.taskChunkIndexFallbacks[manifest.ID] = indexFallbackID
+		} else {
+			delete(s.taskChunkIndexFallbacks, manifest.ID)
+		}
 	} else {
 		delete(s.taskChunkIndexes, manifest.ID)
+		delete(s.taskChunkIndexFallbacks, manifest.ID)
 	}
 	if manifestCopy.State == "preflight" {
 		if s.taskChunkAlternates == nil {
@@ -582,7 +614,7 @@ func (s *controlServer) setTaskManifest(ctx context.Context, manifest *SnapshotM
 	}
 	s.mu.Unlock()
 	if indexed {
-		log.Info("Indexed replication manifest chunks: snapshot=%s state=%s unique_chunks=%d alternate_hashes=%d duration=%s", manifest.ID, manifestCopy.State, len(index), len(alternates), time.Since(indexStarted))
+		log.Info("Indexed replication manifest chunks: snapshot=%s state=%s index_kind=%s index_entries=%d base_snapshot=%s alternate_hashes=%d duration=%s", manifest.ID, manifestCopy.State, indexKind, len(index), indexFallbackID, len(alternates), time.Since(indexStarted))
 	}
 	return nil
 }

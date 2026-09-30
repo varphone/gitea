@@ -332,7 +332,7 @@ scanAttempts:
 		s.failAsyncJob(id, err)
 		return
 	}
-	if err := s.setTaskManifest(ctx, manifest); err != nil {
+	if err := s.setTaskManifest(ctx, manifest, ""); err != nil {
 		log.Error("Preflight task %s chunk index failed after %s: %v", id, time.Since(taskStarted), err)
 		s.failAsyncJob(id, err)
 		return
@@ -508,7 +508,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 		s.failAsyncJob(id, err)
 		return
 	}
-	if err := s.setTaskManifest(outageCtx, manifest); err != nil {
+	if err := s.setTaskManifest(outageCtx, manifest, baseID); err != nil {
 		s.recoverPrimary()
 		err = releaseFinalizeFence(id, fence, err)
 		outageCancel()
@@ -592,6 +592,7 @@ func (s *controlServer) pruneTransientFailedJobsLocked(preserveID string) int {
 		delete(s.jobs, id)
 		delete(s.taskManifests, id)
 		delete(s.taskChunkIndexes, id)
+		delete(s.taskChunkIndexFallbacks, id)
 		delete(s.taskChunkAlternates, id)
 		pruned++
 	}
@@ -711,13 +712,13 @@ func (s *controlServer) finishSession(id string, success bool) error {
 				} else if err := writeManifest(s.cfg.SnapshotDir, manifest); err != nil {
 					log.Error("Persist failed disaster-recovery manifest: snapshot=%s error=%v", id, err)
 				}
-				if err := s.setTaskManifest(context.Background(), manifest); err != nil {
+				if err := s.setTaskManifest(context.Background(), manifest, ""); err != nil {
 					finishErr = errors.Join(finishErr, err)
 					log.Error("Update failed replication task manifest in memory failed: snapshot=%s error=%v", id, err)
 				}
 			}
 		} else {
-			if err := s.setTaskManifest(context.Background(), manifest); err != nil {
+			if err := s.setTaskManifest(context.Background(), manifest, ""); err != nil {
 				finishErr = errors.Join(finishErr, err)
 				log.Error("Update finalized replication task manifest in memory failed: snapshot=%s error=%v", id, err)
 			}
