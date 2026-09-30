@@ -84,26 +84,37 @@ func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(history)))
 	paths = append(paths, history...)
-	seen := map[string]struct{}{}
+	seenPaths := map[string]struct{}{}
+	seenIDs := map[string]struct{}{}
 	var latestReady, fallback *SnapshotManifest
 	for _, path := range paths {
-		if _, ok := seen[path]; ok {
+		if _, ok := seenPaths[path]; ok {
 			continue
 		}
-		seen[path] = struct{}{}
-		manifest, err := loadTrustedManifest(path, s.cfg.ControlToken, "ready")
-		if err == nil {
+		seenPaths[path] = struct{}{}
+		if id := strings.TrimSuffix(filepath.Base(path), ".json"); validSnapshotID(id) {
+			if _, ok := seenIDs[id]; ok {
+				continue
+			}
+		}
+		manifest, err := loadManifestFile(path)
+		if err != nil || validateManifestIdentity(manifest, s.cfg.ControlToken) != nil {
+			continue
+		}
+		if _, ok := seenIDs[manifest.ID]; ok {
+			continue
+		}
+		switch manifest.State {
+		case "ready":
+			seenIDs[manifest.ID] = struct{}{}
 			if newerManifest(manifest, latestReady) {
 				latestReady = manifest
 			}
-			continue
-		}
-		manifest, err = loadTrustedManifestStates(path, s.cfg.ControlToken, "preflight", "transferring")
-		if err != nil {
-			continue
-		}
-		if newerManifest(manifest, fallback) {
-			fallback = manifest
+		case "preflight", "transferring":
+			seenIDs[manifest.ID] = struct{}{}
+			if newerManifest(manifest, fallback) {
+				fallback = manifest
+			}
 		}
 	}
 	if latestReady != nil {
