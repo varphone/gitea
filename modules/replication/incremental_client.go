@@ -1474,6 +1474,9 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 		log.Error("Persist current standby manifest failed: snapshot=%s error=%v", final.ID, err)
 		return err
 	}
+	if err := pruneFailedRestoreStages(cfg.SnapshotDir, 0); err != nil {
+		log.Warn("Remove failed standby restore stages after successful sync: snapshot=%s error=%v", final.ID, err)
+	}
 	pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention, cfg.ControlToken)
 	if err := os.RemoveAll(cacheDir); err != nil {
 		log.Warn("Remove completed incremental cache: snapshot=%s error=%v", final.ID, err)
@@ -1518,6 +1521,10 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 		return err
 	}
 	pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention, cfg.ControlToken)
+	if err := pruneFailedRestoreStages(cfg.SnapshotDir, 1); err != nil {
+		log.Error("Cannot prune older failed standby restore stages: error=%v", err)
+		return err
+	}
 	stage := installStagePath(cfg)
 	currentPath := filepath.Join(cfg.SnapshotDir, "current.json")
 	previous := previousManifest(currentPath, cfg.ControlToken)

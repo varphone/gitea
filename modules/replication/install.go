@@ -127,6 +127,7 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 			return errors.Join(cause, fmt.Errorf("cannot safely stop failed restored service: %w", err))
 		}
 		rollbackAttempted := activated
+		failedStagePreserved := false
 		if rollbackAttempted {
 			rollbackStarted := time.Now()
 			if err := atomicSwitchWithTimeout(cfg.ServiceTimeout, cfg); err != nil {
@@ -159,6 +160,7 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 					rollbackErrors = append(rollbackErrors, fmt.Errorf("preserve failed restore: %w", err))
 				} else {
 					stageOwned = false
+					failedStagePreserved = true
 				}
 			} else {
 				if stageErr == nil {
@@ -196,6 +198,12 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 				} else {
 					log.Info("Restarted previous standby service after rollback: snapshot=%s duration=%s", snapshot.ID, time.Since(restartStarted))
 				}
+			}
+		}
+		if failedStagePreserved {
+			if err := pruneFailedRestoreStages(cfg.SnapshotDir, 1); err != nil {
+				log.Warn("Prune older failed standby restore stages failed: snapshot=%s error=%v", snapshot.ID, err)
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("prune old failed restore stages: %w", err))
 			}
 		}
 		return errors.Join(append([]error{cause}, rollbackErrors...)...)
@@ -308,6 +316,61 @@ func leaveStageWorkingDirectory(stage string) error {
 		return nil
 	}
 	return os.Chdir(filepath.Dir(stage))
+}
+
+func pruneFailedRestoreStages(snapshotDir string, keep int) error {
+	entries, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		return err
+	}
+	var stages []string
+	for _, entry := range entries {
+		failedID, ok := strings.CutPrefix(entry.Name(), ".failed-")
+		if !ok {
+			continue
+		}
+		if strings.Contains(failedID, "-") {
+			failedID, _, _ = strings.Cut(failedID, "-")
+		}
+		if !validSnapshotID(failedID) {
+			continue
+		}
+		path := filepath.Join(snapshotDir, entry.Name())
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			stages = append(stages, path)
+		}
+	}
+	if keep < 0 {
+		keep = 0
+	}
+	removeCount := len(stages) - keep
+	if removeCount <= 0 {
+		return nil
+	}
+	var cleanupErrors []error
+	removed := 0
+	for _, stage := range stages[:removeCount] {
+		err := errors.Join(makeTreeRemovable(context.Background(), stage), os.RemoveAll(stage))
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove failed standby restore stage %q: %w", filepath.Base(stage), err))
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		if err := syncDirectory(snapshotDir); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("sync failed restore stage cleanup: %w", err))
+		}
+		log.Info("Pruned failed standby restore stages: removed=%d retained=%d", removed, len(stages)-removed)
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 type cleanupWarning struct{ err error }

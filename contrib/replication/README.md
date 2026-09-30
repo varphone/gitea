@@ -169,7 +169,9 @@ The primary needs space only for manifests. The standby needs its active data,
 the current delta chunk cache, and staging metadata. Unchanged files are
 hard-linked into staging, so they consume no second copy. Changed files require
 temporary space equal to their reconstructed size until the atomic switch and
-old-tree cleanup complete.
+old-tree cleanup complete. A failed activation retains one failed staging tree
+for diagnosis; the next failed activation replaces it, and a successful restore
+clears it.
 
 An interrupted preflight leaves Gitea online. An interrupted final session is
 bounded by `FINAL_SESSION_TIMEOUT`; transient transport failures retain the active
