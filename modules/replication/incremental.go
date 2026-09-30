@@ -514,6 +514,9 @@ func manifestDigest(manifest *SnapshotManifest) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(data) > maxManifestSize {
+		return "", errors.New("incremental manifest exceeds maximum size")
+	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
 }
