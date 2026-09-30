@@ -693,9 +693,6 @@ func validateIncrementalManifest(m *SnapshotManifest) error {
 			if e.LinkTarget != "" {
 				return fmt.Errorf("invalid file link target in %q", e.Path)
 			}
-			if e.ChangeID == "" {
-				return fmt.Errorf("missing file change identity in %q", e.Path)
-			}
 			var offset int64
 			for _, c := range e.Chunks {
 				if len(c.Hash) != sha256.Size*2 || c.Offset != offset || c.Size <= 0 || c.Size > chunkMaxSize {

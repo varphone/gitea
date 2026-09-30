@@ -6,10 +6,8 @@
 package replication
 
 import (
-	"fmt"
 	"os"
 )
 
-func fileChangeID(info os.FileInfo) string {
-	return fmt.Sprintf("%d:%d:%d", info.Size(), info.Mode(), info.ModTime().UnixNano())
-}
+// Without a stable file identity, callers must rehash files instead of reusing old chunks.
+func fileChangeID(_ os.FileInfo) string { return "" }

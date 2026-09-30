@@ -856,7 +856,8 @@ sendJobs:
 }
 
 func sameFile(a, b TreeEntry) bool {
-	return a.Type == "file" && b.Type == "file" && a.Size == b.Size && a.Mode == b.Mode &&
+	return a.Type == "file" && b.Type == "file" && a.ChangeID != "" && b.ChangeID != "" &&
+		a.Size == b.Size && a.Mode == b.Mode &&
 		a.ModTimeNS == b.ModTimeNS && reflect.DeepEqual(a.Chunks, b.Chunks)
 }
 
