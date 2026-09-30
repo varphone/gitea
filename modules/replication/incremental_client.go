@@ -1504,7 +1504,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 }
 
 func writeManifestAt(path string, manifest *SnapshotManifest) error {
-	data, err := json.MarshalIndent(manifest, "", "  ")
+	data, err := json.Marshal(manifest)
 	if err != nil {
 		return err
 	}
