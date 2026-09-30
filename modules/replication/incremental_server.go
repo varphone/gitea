@@ -378,9 +378,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 		err = ensureSocketActivationDisabled(scanCtx, s.cfg.GiteaServiceName)
 	}
 	if err != nil {
-		if fence != nil {
-			_ = fence.Release()
-		}
+		err = releaseFinalizeFence(id, fence, err)
 		scanCancel()
 		log.Error("Finalize task %s failed before stopping primary after %s: %v", id, time.Since(fenceStarted), err)
 		s.failAsyncJob(id, err)
@@ -396,7 +394,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 		if stopAttempted {
 			s.recoverPrimary()
 		}
-		_ = fence.Release()
+		err = releaseFinalizeFence(id, fence, err)
 		outageCancel()
 		log.Error("Finalize task %s failed while stopping primary after %s: %v", id, time.Since(stopStarted), err)
 		s.failAsyncJob(id, err)
@@ -408,7 +406,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 	manifest, err := scanIncrementalTreeWithBase(outageCtx, s.root(), base)
 	if err != nil {
 		s.recoverPrimary()
-		_ = fence.Release()
+		err = releaseFinalizeFence(id, fence, err)
 		outageCancel()
 		log.Error("Finalize task %s final scan failed: scan_duration=%s primary_outage=%s error=%v", id, time.Since(finalScanStarted), time.Since(outageStarted), err)
 		s.failAsyncJob(id, err)
@@ -422,7 +420,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 	manifest.RequestID, manifest.BaseJobID = requestID, baseID
 	if err := signIncrementalManifest(manifest, s.cfg.ControlToken); err != nil {
 		s.recoverPrimary()
-		_ = fence.Release()
+		err = releaseFinalizeFence(id, fence, err)
 		outageCancel()
 		log.Error("Finalize task %s signing failed: primary_outage=%s total_duration=%s error=%v", id, time.Since(outageStarted), time.Since(taskStarted), err)
 		s.failAsyncJob(id, err)
@@ -430,7 +428,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 	}
 	if err := writeManifest(s.cfg.SnapshotDir, manifest); err != nil {
 		s.recoverPrimary()
-		_ = fence.Release()
+		err = releaseFinalizeFence(id, fence, err)
 		outageCancel()
 		log.Error("Finalize task %s persist failed: primary_outage=%s total_duration=%s error=%v", id, time.Since(outageStarted), time.Since(taskStarted), err)
 		s.failAsyncJob(id, err)
@@ -451,6 +449,18 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 	s.mu.Unlock()
 	log.Info("Finalize task %s prepared transfer session %s: primary_outage=%s remaining_budget=%s total_duration=%s", id, manifest.ID, time.Since(outageStarted), time.Until(deadline), time.Since(taskStarted))
 	go s.expireSession(session)
+}
+
+func releaseFinalizeFence(id string, fence *WriteFence, cause error) error {
+	if fence == nil {
+		return cause
+	}
+	if err := fence.Release(); err != nil {
+		releaseErr := fmt.Errorf("release primary write fence: %w", err)
+		log.Error("Finalize task %s failed to release the primary write fence: %v", id, err)
+		return errors.Join(cause, releaseErr)
+	}
+	return cause
 }
 
 func (s *controlServer) failAsyncJob(id string, err error) {
