@@ -1226,20 +1226,20 @@ sendJobs:
 	elapsed := preparationDuration + time.Since(started)
 	startedCount := requestsStarted.Load()
 	fetchedCount, bytes, deferredCount := fetched.Load(), fetchedBytes.Load(), deferred.Load()
-	canceledCount := max(int64(0), startedCount-fetchedCount-deferredCount)
+	incompleteCount := max(int64(0), startedCount-fetchedCount-deferredCount)
 	notStartedCount := max(int64(0), int64(len(hashes))-startedCount)
 	if firstErr != nil {
-		log.Error("Preflight chunk transfer failed: snapshot=%s hash=%s requests_started=%d fetched=%d/%d payload_bytes=%d expected_payload_bytes=%d server_encoded_body_bytes=%d measured_responses=%d/%d cached_candidates=%d deferred_changed=%d canceled=%d not_started=%d elapsed=%s error=%v", id, firstHash, startedCount, fetchedCount, len(hashes), bytes, expectedBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetchedCount, cached, deferredCount, canceledCount, notStartedCount, elapsed, firstErr)
+		log.Error("Preflight chunk transfer failed: snapshot=%s hash=%s requests_started=%d fetched=%d/%d payload_bytes=%d expected_payload_bytes=%d server_encoded_body_bytes=%d measured_responses=%d/%d cached_candidates=%d deferred_changed=%d incomplete=%d not_started=%d elapsed=%s error=%v", id, firstHash, startedCount, fetchedCount, len(hashes), bytes, expectedBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetchedCount, cached, deferredCount, incompleteCount, notStartedCount, elapsed, firstErr)
 		return firstErr
 	}
 	if err := ctx.Err(); err != nil {
-		log.Error("Preflight chunk transfer canceled: snapshot=%s requests_started=%d fetched=%d/%d payload_bytes=%d expected_payload_bytes=%d server_encoded_body_bytes=%d measured_responses=%d/%d cached_candidates=%d deferred_changed=%d canceled=%d not_started=%d elapsed=%s error=%v", id, startedCount, fetchedCount, len(hashes), bytes, expectedBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetchedCount, cached, deferredCount, canceledCount, notStartedCount, elapsed, err)
+		log.Error("Preflight chunk transfer canceled: snapshot=%s requests_started=%d fetched=%d/%d payload_bytes=%d expected_payload_bytes=%d server_encoded_body_bytes=%d measured_responses=%d/%d cached_candidates=%d deferred_changed=%d incomplete=%d not_started=%d elapsed=%s error=%v", id, startedCount, fetchedCount, len(hashes), bytes, expectedBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetchedCount, cached, deferredCount, incompleteCount, notStartedCount, elapsed, err)
 		return err
 	}
 	if fetchedCount == 0 && deferredCount > 0 {
 		log.Warn("Finished preflight chunk pass for snapshot %s without caching any chunks; source changed before every fetch (cached=%d deferred=%d total=%d elapsed=%s)", id, cached, deferredCount, total, elapsed)
 	}
-	log.Info("Finished preflight chunk pass for snapshot %s: requests_started=%d fetched=%d payload_bytes=%d server_encoded_body_bytes=%d measured_responses=%d/%d reusable_candidates=%d reusable_candidate_payload_bytes=%d average_payload_mib_per_sec=%.2f deferred_changed=%d canceled=%d not_started=%d total=%d duration=%s", id, startedCount, fetchedCount, bytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetchedCount, cached, cachedBytes, transferRateMiBPerSecond(bytes, elapsed), deferredCount, canceledCount, notStartedCount, total, elapsed)
+	log.Info("Finished preflight chunk pass for snapshot %s: requests_started=%d fetched=%d payload_bytes=%d server_encoded_body_bytes=%d measured_responses=%d/%d reusable_candidates=%d reusable_candidate_payload_bytes=%d average_payload_mib_per_sec=%.2f deferred_changed=%d incomplete=%d not_started=%d total=%d duration=%s", id, startedCount, fetchedCount, bytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetchedCount, cached, cachedBytes, transferRateMiBPerSecond(bytes, elapsed), deferredCount, incompleteCount, notStartedCount, total, elapsed)
 	return nil
 }
 
