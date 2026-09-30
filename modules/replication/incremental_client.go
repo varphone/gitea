@@ -1106,6 +1106,16 @@ func sameFile(a, b TreeEntry) bool {
 		a.ModTimeNS == b.ModTimeNS && reflect.DeepEqual(a.Chunks, b.Chunks)
 }
 
+func setLocalChangeID(entry *TreeEntry, info os.FileInfo) bool {
+	entry.LocalChangeID = ""
+	if entry.Type != "file" || info == nil || !info.Mode().IsRegular() || info.Size() != entry.Size ||
+		uint32(info.Mode().Perm()) != entry.Mode || info.ModTime().UnixNano() != entry.ModTimeNS {
+		return false
+	}
+	entry.LocalChangeID = fileChangeID(info)
+	return entry.LocalChangeID != ""
+}
+
 func recordLocalChangeIDs(root string, manifest *SnapshotManifest) {
 	recorded, skipped := 0, 0
 	var firstSkip error
@@ -1116,16 +1126,16 @@ func recordLocalChangeIDs(root string, manifest *SnapshotManifest) {
 			continue
 		}
 		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(entry.Path)))
-		if err == nil && info.Mode().IsRegular() && info.Size() == entry.Size &&
-			uint32(info.Mode().Perm()) == entry.Mode && info.ModTime().UnixNano() == entry.ModTimeNS {
-			entry.LocalChangeID = fileChangeID(info)
-			if entry.LocalChangeID != "" {
-				recorded++
-				continue
-			}
-			err = errors.New("filesystem does not provide a stable file identity")
+		if err == nil && setLocalChangeID(entry, info) {
+			recorded++
+			continue
 		} else if err == nil {
-			err = errors.New("local file metadata does not match the restored manifest")
+			if info.Mode().IsRegular() && info.Size() == entry.Size &&
+				uint32(info.Mode().Perm()) == entry.Mode && info.ModTime().UnixNano() == entry.ModTimeNS {
+				err = errors.New("filesystem does not provide a stable file identity")
+			} else {
+				err = errors.New("local file metadata does not match the restored manifest")
+			}
 		}
 		skipped++
 		if firstSkip == nil {
@@ -1147,7 +1157,7 @@ func verifyRestoredFileIdentities(ctx context.Context, root string, manifest *Sn
 			localPaths[filepath.ToSlash(rel)] = struct{}{}
 		}
 	}
-	identityMatches, contentChecks := 0, 0
+	identityMatches, contentChecks, localIdentities := 0, 0, 0
 	for i := range manifest.Files {
 		entry := &manifest.Files[i]
 		if err := ctx.Err(); err != nil {
@@ -1156,10 +1166,14 @@ func verifyRestoredFileIdentities(ctx context.Context, root string, manifest *Sn
 		if entry.Type != "file" {
 			continue
 		}
+		path := filepath.Join(root, filepath.FromSlash(entry.Path))
 		if _, isLocal := localPaths[entry.Path]; isLocal {
+			info, _ := reusableWholeFileInfo(path, *entry)
+			if setLocalChangeID(entry, info) {
+				localIdentities++
+			}
 			continue
 		}
-		path := filepath.Join(root, filepath.FromSlash(entry.Path))
 		info, reusable := reusableWholeFileInfo(path, *entry)
 		if !reusable {
 			return fmt.Errorf("restored file metadata changed during standby readiness: %s", entry.Path)
@@ -1169,25 +1183,18 @@ func verifyRestoredFileIdentities(ctx context.Context, root string, manifest *Sn
 			identityMatches++
 			continue
 		}
-		matches, err := fileMatchesManifestChunks(ctx, path, *entry)
+		matches, verifiedInfo, err := fileMatchesManifestChunksWithInfo(ctx, path, *entry)
 		if err != nil {
 			return fmt.Errorf("verify restored file %s after standby readiness: %w", entry.Path, err)
 		}
 		if !matches {
 			return fmt.Errorf("restored file content changed during standby readiness: %s", entry.Path)
 		}
-		entry.LocalChangeID = localID
+		setLocalChangeID(entry, verifiedInfo)
 		contentChecks++
 	}
-	if contentChecks > 0 {
-		log.Info("Verified restored standby files after readiness: snapshot=%s identity_matches=%d content_hashed=%d", manifest.ID, identityMatches, contentChecks)
-	}
+	log.Info("Verified restored standby files after readiness: snapshot=%s identity_matches=%d content_hashed=%d local_identities=%d", manifest.ID, identityMatches, contentChecks, localIdentities)
 	return nil
-}
-
-func reusableWholeFile(path string, entry TreeEntry) bool {
-	_, ok := reusableWholeFileInfo(path, entry)
-	return ok
 }
 
 func reusableWholeFileInfo(path string, entry TreeEntry) (os.FileInfo, bool) {
@@ -1200,25 +1207,30 @@ func reusableWholeFileInfo(path string, entry TreeEntry) (os.FileInfo, bool) {
 }
 
 func fileMatchesManifestChunks(ctx context.Context, path string, entry TreeEntry) (bool, error) {
+	matches, _, err := fileMatchesManifestChunksWithInfo(ctx, path, entry)
+	return matches, err
+}
+
+func fileMatchesManifestChunksWithInfo(ctx context.Context, path string, entry TreeEntry) (bool, os.FileInfo, error) {
 	before, reusable := reusableWholeFileInfo(path, entry)
 	if !reusable {
-		return false, nil
+		return false, nil, nil
 	}
 	beforeChangeID := fileChangeID(before)
 	chunks, err := splitFile(ctx, path)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	after, err := os.Lstat(path)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if !after.Mode().IsRegular() || !os.SameFile(before, after) || after.Size() != entry.Size ||
 		uint32(after.Mode().Perm()) != entry.Mode || after.ModTime().UnixNano() != entry.ModTimeNS ||
 		(beforeChangeID != "" && beforeChangeID != fileChangeID(after)) {
-		return false, errIncrementalTreeChanged
+		return false, nil, errIncrementalTreeChanged
 	}
-	return sameChunks(chunks, entry.Chunks), nil
+	return sameChunks(chunks, entry.Chunks), after, nil
 }
 
 func makeTreeRemovable(ctx context.Context, root string) error {
@@ -1327,6 +1339,18 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	if err := pruneUnexpectedStageEntries(ctx, stage, manifest); err != nil {
 		return err
 	}
+	fileCount, identitiesRecorded := 0, 0
+	for i := range manifest.Files {
+		manifest.Files[i].LocalChangeID = ""
+		if manifest.Files[i].Type == "file" {
+			fileCount++
+		}
+	}
+	captureIdentity := func(entryIndex int, info os.FileInfo) {
+		if setLocalChangeID(&manifest.Files[entryIndex], info) {
+			identitiesRecorded++
+		}
+	}
 	stageTempDir, err := createStageTempDir(stage, manifest)
 	if err != nil {
 		return fmt.Errorf("create incremental staging temporary directory: %w", err)
@@ -1420,14 +1444,13 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 				return stagingPathError("create symlink", entry.Path, err)
 			}
 		case "file":
-			if reusableWholeFile(dst, entry) {
-				matches, err := fileMatchesManifestChunks(ctx, dst, entry)
-				if err == nil && matches {
-					continue
-				}
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
+			matches, info, err := fileMatchesManifestChunksWithInfo(ctx, dst, entry)
+			if err == nil && matches {
+				captureIdentity(entryIndex, info)
+				continue
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
 			old := oldEntries[entry.Path]
 			source := filepath.Join(root, filepath.FromSlash(entry.Path))
@@ -1449,6 +1472,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 						if err := os.Link(source, dst); err == nil {
 							linkedInfo, statErr := os.Lstat(dst)
 							if statErr == nil && linkedInfo.Mode().IsRegular() && os.SameFile(sourceInfo, linkedInfo) {
+								captureIdentity(entryIndex, linkedInfo)
 								continue
 							}
 							if removeErr := os.Remove(dst); removeErr != nil && !os.IsNotExist(removeErr) {
@@ -1530,6 +1554,9 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			if err := os.Rename(tmp, dst); err != nil {
 				return stagingPathError("activate temporary file", entry.Path, err)
 			}
+			if info, err := os.Lstat(dst); err == nil {
+				captureIdentity(entryIndex, info)
+			}
 		}
 	}
 	if err := os.RemoveAll(stageTempDir); err != nil {
@@ -1551,6 +1578,11 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	}
 	if err := os.Chmod(stage, os.FileMode(manifest.RootMode)); err != nil {
 		return fmt.Errorf("restore staging root permissions: %w", err)
+	}
+	if identitiesRecorded == fileCount {
+		log.Info("Captured staging file identities: snapshot=%s files=%d", manifest.ID, identitiesRecorded)
+	} else {
+		log.Warn("Could not capture all staging file identities: snapshot=%s recorded=%d total=%d", manifest.ID, identitiesRecorded, fileCount)
 	}
 	return nil
 }
@@ -1763,7 +1795,6 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 	log.Info("Prepared incremental stage: snapshot=%s duration=%s", final.ID, time.Since(stageStarted))
 	log.Info("Activating incremental stage for snapshot %s on the standby", final.ID)
 	activationStarted := time.Now()
-	recordLocalChangeIDs(stage, final)
 	if err := installPreparedSnapshotWithVerifier(ctx, stage, &final.Snapshot, cfg, func() error {
 		return verifyRestoredFileIdentities(ctx, root, final)
 	}); err != nil {
