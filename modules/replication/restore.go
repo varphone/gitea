@@ -158,7 +158,16 @@ func EnsurePrimaryService(ctx context.Context) error {
 	}
 	taskCtx, cancel := context.WithTimeout(ctx, cfg.ServiceTimeout)
 	defer cancel()
-	return systemctl(taskCtx, "start", cfg.GiteaServiceName)
+	if err := systemctl(taskCtx, "start", cfg.GiteaServiceName); err != nil {
+		return err
+	}
+	if err := readinessCheck(taskCtx, cfg.GiteaServiceName); err != nil {
+		return fmt.Errorf("wait for primary service %s readiness: %w", cfg.GiteaServiceName, err)
+	}
+	if err := clearPrimaryOutageCheckpoint(cfg.SnapshotDir); err != nil {
+		return fmt.Errorf("clear primary outage recovery checkpoint: %w", err)
+	}
+	return nil
 }
 
 func ControlStatus(ctx context.Context) ([]*Snapshot, error) {
