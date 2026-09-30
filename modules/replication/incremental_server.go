@@ -364,6 +364,7 @@ func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
 			}
 			job := *existing
 			s.mu.Unlock()
+			log.Info("Finalize request matched existing task: task=%s base=%s state=%s request_id=%s", job.ID, baseID, job.State, requestID)
 			if job.State == snapshotStateCreating || job.State == "transferring" {
 				writeJSONStatus(w, http.StatusAccepted, job)
 				return
