@@ -1393,16 +1393,20 @@ func resumeFinalSync(ctx context.Context, cfg *config, base string, client *http
 	}
 	status, err := requestSnapshotStatus(ctx, client, base, cfg.ControlToken, final.ID)
 	if err != nil {
+		log.Error("Cannot check remote status for final sync checkpoint: snapshot=%s error=%v", final.ID, err)
 		return true, err
 	}
 	if status.State != "transferring" {
+		log.Info("Remote final sync checkpoint is no longer active: snapshot=%s state=%s; starting a new sync", final.ID, status.State)
 		return false, nil
 	}
 	remote, err := requestManifestByID(ctx, client, base, cfg.ControlToken, final.ID, "transferring")
 	if err != nil {
+		log.Error("Cannot load remote manifest for final sync checkpoint: snapshot=%s error=%v", final.ID, err)
 		return true, err
 	}
 	if remote.SHA256 != final.SHA256 {
+		log.Error("Remote final sync manifest does not match local checkpoint: snapshot=%s local_sha256=%s remote_sha256=%s", final.ID, final.SHA256, remote.SHA256)
 		return true, errors.New("active final sync manifest does not match the local recovery checkpoint")
 	}
 	log.Info("Resuming active final sync session %s from verified local chunk cache", final.ID)
