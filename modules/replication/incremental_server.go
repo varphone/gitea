@@ -326,8 +326,8 @@ scanAttempts:
 	}
 	s.setTaskManifest(manifest)
 	log.Info("Preflight task %s completed: mode=%s base=%s entries=%d bytes=%d scan_duration=%s total_duration=%s", id, scanMode, baseID, manifest.FileCount, manifest.Size, scanDuration, time.Since(taskStarted))
-	s.completeAsyncJob(id, manifest.Snapshot)
 	s.prune()
+	s.completeAsyncJob(id, manifest.Snapshot)
 }
 
 func (s *controlServer) finalize(w http.ResponseWriter, r *http.Request) {
