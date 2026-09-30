@@ -4,15 +4,20 @@
 package replication
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
+	"gitea.dev/modules/json"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/setting"
 )
 
 const replicaReadOnlyMessage = "disaster-recovery replica is read-only; login and write operations are disabled until an operator promotes this node after fencing the primary"
+
+const maxReplicaReadOnlyLFSBatchBytes = 1 << 20
 
 var replicaStateChangingRoutes = [...]string{
 	"/user/activate",
@@ -53,10 +58,48 @@ func ReadOnlyMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			next.ServeHTTP(w, request)
+		case http.MethodPost:
+			if isReplicaReadOnlySafePost(request) {
+				next.ServeHTTP(w, request)
+				return
+			}
+			writeReplicaReadOnlyResponse(w, request)
 		default:
 			writeReplicaReadOnlyResponse(w, request)
 		}
 	})
+}
+
+func isReplicaReadOnlySafePost(request *http.Request) bool {
+	path := request.URL.Path
+	if subURL := strings.TrimSuffix(setting.AppSubURL, "/"); subURL != "" && strings.HasPrefix(path, subURL+"/") {
+		path = strings.TrimPrefix(path, subURL)
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 3 && parts[0] != "" && parts[1] != "" {
+		// Git smart HTTP uses POST for fetch and archive reads.
+		return parts[2] == "git-upload-pack" || parts[2] == "git-upload-archive"
+	}
+	if len(parts) != 6 || parts[0] == "" || parts[1] == "" ||
+		parts[2] != "info" || parts[3] != "lfs" || parts[4] != "objects" || parts[5] != "batch" {
+		return false
+	}
+	return isReplicaReadOnlyLFSDownload(request)
+}
+
+func isReplicaReadOnlyLFSDownload(request *http.Request) bool {
+	if request.Body == nil {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, maxReplicaReadOnlyLFSBatchBytes+1))
+	if err != nil || len(body) > maxReplicaReadOnlyLFSBatchBytes {
+		return false
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	var batch struct {
+		Operation string `json:"operation"`
+	}
+	return json.Unmarshal(body, &batch) == nil && batch.Operation == "download"
 }
 
 func isReplicaStateChangingRoute(path string) bool {
