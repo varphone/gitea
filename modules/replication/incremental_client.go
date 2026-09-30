@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1124,7 +1123,7 @@ sendJobs:
 func sameFile(a, b TreeEntry) bool {
 	return a.Type == "file" && b.Type == "file" && a.ChangeID != "" && b.ChangeID != "" &&
 		a.Size == b.Size && a.Mode == b.Mode &&
-		a.ModTimeNS == b.ModTimeNS && reflect.DeepEqual(a.Chunks, b.Chunks)
+		a.ModTimeNS == b.ModTimeNS && sameChunks(a.Chunks, b.Chunks)
 }
 
 func setLocalChangeID(entry *TreeEntry, info os.FileInfo) bool {
