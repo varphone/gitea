@@ -459,6 +459,15 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 				old.Mode == uint32(info.Mode().Perm()) && old.ModTimeNS == info.ModTime().UnixNano() &&
 				old.ChangeID != "" && old.ChangeID == e.ChangeID
 			if metadataUnchanged && !verifyAll {
+				after, err := os.Lstat(path)
+				if err != nil {
+					return scanPathError(rel, err)
+				}
+				if !after.Mode().IsRegular() || !os.SameFile(info, after) || after.Size() != e.Size ||
+					uint32(after.Mode().Perm()) != e.Mode || after.ModTime().UnixNano() != e.ModTimeNS ||
+					fileChangeID(after) != e.ChangeID {
+					return fmt.Errorf("%w: %s", errIncrementalTreeChanged, rel)
+				}
 				e.Chunks = old.Chunks
 				m.Size += e.Size
 				m.Files = append(m.Files, e)
