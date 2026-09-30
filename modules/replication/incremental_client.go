@@ -1131,6 +1131,123 @@ func sameFile(a, b TreeEntry) bool {
 		a.ModTimeNS == b.ModTimeNS && sameChunks(a.Chunks, b.Chunks)
 }
 
+func copyFileWithContext(ctx context.Context, dst, src *os.File) (int64, error) {
+	buffer := make([]byte, 256<<10)
+	var copied int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return copied, err
+		}
+		read, readErr := src.Read(buffer)
+		for written := 0; written < read; {
+			n, writeErr := dst.Write(buffer[written:read])
+			copied += int64(n)
+			written += n
+			if writeErr != nil {
+				return copied, writeErr
+			}
+			if n == 0 {
+				return copied, io.ErrShortWrite
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return copied, nil
+			}
+			return copied, readErr
+		}
+		if read == 0 {
+			return copied, io.ErrNoProgress
+		}
+	}
+}
+
+// Keep staging independent from the old root so standby writes cannot change rollback data.
+func materializeBaselineFile(ctx context.Context, source string, sourceInfo os.FileInfo, dst string, entry TreeEntry) (bool, int64, os.FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return false, 0, nil, err
+	}
+	sourceFile, openedInfo, err := openRegularFile(source, sourceInfo)
+	if err != nil {
+		return false, 0, nil, err
+	}
+	defer sourceFile.Close()
+	if !openedInfo.Mode().IsRegular() || openedInfo.Size() != entry.Size ||
+		uint32(openedInfo.Mode().Perm()) != entry.Mode || openedInfo.ModTime().UnixNano() != entry.ModTimeNS ||
+		fileChangeID(openedInfo) == "" || fileChangeID(openedInfo) != fileChangeID(sourceInfo) {
+		return false, 0, nil, errIncrementalTreeChanged
+	}
+
+	out, err := os.CreateTemp(filepath.Dir(dst), ".replication-reuse-*")
+	if err != nil {
+		return false, 0, nil, err
+	}
+	tmp := out.Name()
+	defer os.Remove(tmp)
+	cloned := cloneFileData(out, sourceFile) == nil
+	var copied int64
+	if !cloned {
+		if err := out.Truncate(0); err != nil {
+			_ = out.Close()
+			return false, 0, nil, err
+		}
+		if _, err := out.Seek(0, io.SeekStart); err != nil {
+			_ = out.Close()
+			return false, 0, nil, err
+		}
+		if _, err := sourceFile.Seek(0, io.SeekStart); err != nil {
+			_ = out.Close()
+			return false, 0, nil, err
+		}
+		copied, err = copyFileWithContext(ctx, out, sourceFile)
+		if err != nil {
+			_ = out.Close()
+			return false, copied, nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		_ = out.Close()
+		return false, copied, nil, err
+	}
+	if err := out.Chmod(os.FileMode(entry.Mode)); err != nil {
+		_ = out.Close()
+		return false, copied, nil, err
+	}
+	mtime := time.Unix(0, entry.ModTimeNS)
+	if err := os.Chtimes(tmp, mtime, mtime); err != nil {
+		_ = out.Close()
+		return false, copied, nil, err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return false, copied, nil, err
+	}
+	if err := out.Close(); err != nil {
+		return false, copied, nil, err
+	}
+	after, err := os.Lstat(source)
+	if err != nil {
+		return false, copied, nil, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(sourceInfo, after) || after.Size() != entry.Size ||
+		uint32(after.Mode().Perm()) != entry.Mode || after.ModTime().UnixNano() != entry.ModTimeNS ||
+		fileChangeID(after) != fileChangeID(sourceInfo) {
+		return false, copied, nil, errIncrementalTreeChanged
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return false, copied, nil, err
+	}
+	stagedInfo, err := os.Lstat(dst)
+	if err != nil {
+		return false, copied, nil, err
+	}
+	if !stagedInfo.Mode().IsRegular() || stagedInfo.Size() != entry.Size ||
+		uint32(stagedInfo.Mode().Perm()) != entry.Mode || stagedInfo.ModTime().UnixNano() != entry.ModTimeNS {
+		return false, copied, nil, errors.New("materialized baseline file metadata does not match manifest")
+	}
+	return cloned, copied, stagedInfo, nil
+}
+
 func setLocalChangeID(entry *TreeEntry, info os.FileInfo) bool {
 	entry.LocalChangeID = ""
 	if entry.Type != "file" || info == nil || !info.Mode().IsRegular() || info.Size() != entry.Size ||
@@ -1366,9 +1483,10 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 		return err
 	}
 	fileCount, identitiesRecorded := 0, 0
-	stagedFilesReused, sourceFilesLinked, filesRebuilt := 0, 0, 0
+	stagedFilesReused, stagedFilesCloned, stagedFilesCopied := 0, 0, 0
+	sourceFilesCloned, sourceFilesCopied, filesRebuilt := 0, 0, 0
 	cacheChunks, localChunks, fetchedChunks := 0, 0, 0
-	var cacheBytes, localBytes, fetchedBytes int64
+	var cacheBytes, localBytes, fetchedBytes, baselineCopyBytes int64
 	for i := range manifest.Files {
 		manifest.Files[i].LocalChangeID = ""
 		if manifest.Files[i].Type == "file" {
@@ -1475,6 +1593,25 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 		case "file":
 			matches, info, err := fileMatchesManifestChunksWithInfo(ctx, dst, entry)
 			if err == nil && matches {
+				if fileHasMultipleLinks(info) {
+					cloned, copied, detachedInfo, detachErr := materializeBaselineFile(ctx, dst, info, dst, entry)
+					if detachErr != nil {
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
+						matches = false
+					} else {
+						info = detachedInfo
+						if cloned {
+							stagedFilesCloned++
+						} else {
+							stagedFilesCopied++
+							baselineCopyBytes += copied
+						}
+					}
+				}
+			}
+			if err == nil && matches {
 				captureIdentity(entryIndex, info)
 				stagedFilesReused++
 				continue
@@ -1499,18 +1636,19 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 						if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 							return stagingPathError("create parent directory for reused file", entry.Path, err)
 						}
-						if err := os.Link(source, dst); err == nil {
-							linkedInfo, statErr := os.Lstat(dst)
-							if statErr == nil && linkedInfo.Mode().IsRegular() && os.SameFile(sourceInfo, linkedInfo) &&
-								linkedInfo.Size() == entry.Size && uint32(linkedInfo.Mode().Perm()) == entry.Mode &&
-								linkedInfo.ModTime().UnixNano() == entry.ModTimeNS {
-								captureIdentity(entryIndex, linkedInfo)
-								sourceFilesLinked++
-								continue
+						cloned, copied, stagedInfo, materializeErr := materializeBaselineFile(ctx, source, sourceInfo, dst, entry)
+						if materializeErr == nil {
+							captureIdentity(entryIndex, stagedInfo)
+							if cloned {
+								sourceFilesCloned++
+							} else {
+								sourceFilesCopied++
+								baselineCopyBytes += copied
 							}
-							if removeErr := os.Remove(dst); removeErr != nil && !os.IsNotExist(removeErr) {
-								return fmt.Errorf("remove invalid reused staging file %q: %w", entry.Path, removeErr)
-							}
+							continue
+						}
+						if ctx.Err() != nil {
+							return ctx.Err()
 						}
 					}
 				}
@@ -1637,7 +1775,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	} else {
 		log.Warn("Could not capture all staging file identities: snapshot=%s recorded=%d total=%d", manifest.ID, identitiesRecorded, fileCount)
 	}
-	log.Info("Built incremental staging tree: snapshot=%s files_stage_reused=%d files_hardlinked_from_baseline=%d files_rebuilt=%d chunks_from_cache=%d cache_payload_bytes=%d chunks_from_local_baseline=%d local_payload_bytes=%d chunks_fetched_on_demand=%d fetched_payload_bytes=%d duration=%s", manifest.ID, stagedFilesReused, sourceFilesLinked, filesRebuilt, cacheChunks, cacheBytes, localChunks, localBytes, fetchedChunks, fetchedBytes, time.Since(stageStarted))
+	log.Info("Built incremental staging tree: snapshot=%s files_stage_reused=%d stage_files_reflinked=%d stage_files_copied=%d files_reflinked_from_baseline=%d files_copied_from_baseline=%d baseline_copy_bytes=%d files_rebuilt=%d chunks_from_cache=%d cache_payload_bytes=%d chunks_from_local_baseline=%d local_payload_bytes=%d chunks_fetched_on_demand=%d fetched_payload_bytes=%d duration=%s", manifest.ID, stagedFilesReused, stagedFilesCloned, stagedFilesCopied, sourceFilesCloned, sourceFilesCopied, baselineCopyBytes, filesRebuilt, cacheChunks, cacheBytes, localChunks, localBytes, fetchedChunks, fetchedBytes, time.Since(stageStarted))
 	return nil
 }
 
