@@ -1159,12 +1159,19 @@ func readStageCheckpoint(path string) (stageCheckpoint, error) {
 	return checkpoint, nil
 }
 
-func prepareIncrementalStage(cfg *config, final *SnapshotManifest, stage string) (bool, error) {
+func prepareIncrementalStage(ctx context.Context, cfg *config, final *SnapshotManifest, stage string) (bool, error) {
 	checkpointPath := stageCheckpointPath(cfg)
 	if checkpoint, err := readStageCheckpoint(checkpointPath); err == nil && checkpoint.SnapshotID == final.ID && checkpoint.ManifestSHA == final.SHA256 {
 		if info, err := os.Lstat(stage); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 			return true, nil
 		}
+	}
+	if _, err := os.Lstat(stage); err == nil {
+		if err := makeStageTreeRemovable(ctx, stage); err != nil {
+			return false, fmt.Errorf("make previous staging tree removable: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return false, err
 	}
 	if err := os.RemoveAll(stage); err != nil {
 		return false, err
@@ -1255,7 +1262,7 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 		return err
 	}
 	log.Info("Final chunk preparation completed: snapshot=%s duration=%s", final.ID, time.Since(chunkPassStarted))
-	resumedStage, err := prepareIncrementalStage(cfg, final, stage)
+	resumedStage, err := prepareIncrementalStage(ctx, cfg, final, stage)
 	if err != nil {
 		log.Error("Cannot prepare incremental stage: snapshot=%s stage=%s error=%v", final.ID, stage, err)
 		return err
