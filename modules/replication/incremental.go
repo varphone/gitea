@@ -740,21 +740,6 @@ func indexManifest(m *SnapshotManifest) map[string]chunkLocation {
 	return index
 }
 
-func indexManifestContext(ctx context.Context, m *SnapshotManifest) (map[string]chunkLocation, error) {
-	index := make(map[string]chunkLocation)
-	for _, entry := range m.Files {
-		for _, chunk := range entry.Chunks {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			if _, ok := index[chunk.Hash]; !ok {
-				index[chunk.Hash] = chunkLocation{entry.Path, chunk.Offset, chunk.Size}
-			}
-		}
-	}
-	return index, nil
-}
-
 func indexManifestWithAlternates(m *SnapshotManifest) (map[string]chunkLocation, map[string][]chunkLocation) {
 	primary, alternates, _ := indexManifestWithAlternatesContext(context.Background(), m)
 	return primary, alternates
@@ -802,19 +787,6 @@ func addChunkAlternate(alternates map[string][]chunkLocation, hash string, prima
 			}
 		}
 	}
-}
-
-func manifestChunkSet(ctx context.Context, m *SnapshotManifest) (map[string]struct{}, error) {
-	chunks := make(map[string]struct{})
-	for _, entry := range m.Files {
-		for _, chunk := range entry.Chunks {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			chunks[chunk.Hash] = struct{}{}
-		}
-	}
-	return chunks, nil
 }
 
 func readChunk(root string, loc chunkLocation, expected string) ([]byte, error) {

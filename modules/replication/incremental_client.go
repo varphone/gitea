@@ -601,63 +601,74 @@ func transferRateMiBPerSecond(size int64, duration time.Duration) float64 {
 	return float64(size) / duration.Seconds() / (1 << 20)
 }
 
+type chunkPlanState uint8
+
+const (
+	chunkPlanReusable chunkPlanState = iota + 1
+	chunkPlanSeen
+)
+
+type chunkFetchPlan struct {
+	hashes       []string
+	total        int
+	reusable     int
+	reusableSize int64
+	missingSize  int64
+}
+
+func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest, cacheDir string) (chunkFetchPlan, error) {
+	plan := chunkFetchPlan{}
+	states := make(map[string]chunkPlanState)
+	if previous != nil {
+		for _, entry := range previous.Files {
+			for _, chunk := range entry.Chunks {
+				if err := ctx.Err(); err != nil {
+					return chunkFetchPlan{}, err
+				}
+				states[chunk.Hash] = chunkPlanReusable
+			}
+		}
+	}
+	for _, entry := range manifest.Files {
+		for _, chunk := range entry.Chunks {
+			if err := ctx.Err(); err != nil {
+				return chunkFetchPlan{}, err
+			}
+			state := states[chunk.Hash]
+			if state == chunkPlanSeen {
+				continue
+			}
+			states[chunk.Hash] = chunkPlanSeen
+			plan.total++
+			if state == chunkPlanReusable || cachedChunkAvailable(cacheDir, chunk.Hash, chunk.Size) {
+				plan.reusable++
+				plan.reusableSize += chunk.Size
+				continue
+			}
+			plan.hashes = append(plan.hashes, chunk.Hash)
+			plan.missingSize += chunk.Size
+		}
+	}
+	return plan, nil
+}
+
 func fetchMissingChunks(ctx context.Context, client *http.Client, base, token string, manifest, previous *SnapshotManifest, cacheDir string, tolerateChanges bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	passStarted := time.Now()
-	var available map[string]struct{}
-	if previous != nil {
-		var err error
-		available, err = manifestChunkSet(ctx, previous)
-		if err != nil {
-			return err
-		}
-	}
-	manifestChunks, err := indexManifestContext(ctx, manifest)
+	plan, err := planMissingChunks(ctx, manifest, previous, cacheDir)
 	if err != nil {
 		return err
 	}
-	total := len(manifestChunks)
 	if !tolerateChanges {
-		skipped := 0
-		var cachedCandidateBytes int64
-		missing := make([]string, 0, total)
-		var missingBytes int64
-		for hash, location := range manifestChunks {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if _, ok := available[hash]; ok || cachedChunkAvailable(cacheDir, hash, location.Size) {
-				skipped++
-				cachedCandidateBytes += location.Size
-				continue
-			}
-			missing = append(missing, hash)
-			missingBytes += location.Size
-		}
-		if err := fetchChunksConcurrently(ctx, client, base, token, manifest.ID, missing, cacheDir, total, skipped, missingBytes); err != nil {
+		if err := fetchChunksConcurrently(ctx, client, base, token, manifest.ID, plan.hashes, cacheDir, plan.total, plan.reusable, plan.missingSize); err != nil {
 			return err
 		}
-		log.Info("Final chunk pass prepared for snapshot %s: download_chunks=%d reusable_candidates=%d total_chunks=%d reusable_candidate_payload_bytes=%d expected_payload_bytes=%d duration=%s", manifest.ID, len(missing), skipped, total, cachedCandidateBytes, missingBytes, time.Since(passStarted))
+		log.Info("Final chunk pass prepared for snapshot %s: download_chunks=%d reusable_candidates=%d total_chunks=%d reusable_candidate_payload_bytes=%d expected_payload_bytes=%d duration=%s", manifest.ID, len(plan.hashes), plan.reusable, plan.total, plan.reusableSize, plan.missingSize, time.Since(passStarted))
 		return nil
 	}
-	skipped := 0
-	var cachedCandidateBytes, missingBytes int64
-	missing := make([]string, 0, total)
-	for hash, location := range manifestChunks {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if _, ok := available[hash]; ok || cachedChunkAvailable(cacheDir, hash, location.Size) {
-			skipped++
-			cachedCandidateBytes += location.Size
-			continue
-		}
-		missing = append(missing, hash)
-		missingBytes += location.Size
-	}
-	return fetchPreflightChunksConcurrently(ctx, client, base, token, manifest.ID, missing, cacheDir, total, skipped, cachedCandidateBytes, missingBytes, time.Since(passStarted))
+	return fetchPreflightChunksConcurrently(ctx, client, base, token, manifest.ID, plan.hashes, cacheDir, plan.total, plan.reusable, plan.reusableSize, plan.missingSize, time.Since(passStarted))
 }
 
 func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, token, id string, hashes []string, cacheDir string, total, cached int, totalBytes int64) error {
