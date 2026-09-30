@@ -255,12 +255,15 @@ func runServ(ctx context.Context, c *cli.Command) error {
 		return fail(ctx, "Unknown git command", "Unknown git command %s %s", verb, lfsVerb)
 	}
 	if requestedMode >= perm.AccessModeWrite {
-		readOnly, fencingEnabled, err := replication.WriteProtection()
+		readOnly, fencingEnabled, primaryRecoveryPending, err := replication.WriteProtection()
 		if err != nil {
 			return fail(ctx, "Unable to determine replication write policy", "Replication configuration error: %v", err)
 		}
 		if readOnly {
 			return fail(ctx, "The disaster-recovery replica is read-only until it is promoted", "Replication replica rejected SSH write")
+		}
+		if primaryRecoveryPending {
+			return fail(ctx, "Gitea is temporarily read-only while primary recovery is pending", "Replication primary rejected SSH write while its recovery checkpoint exists")
 		}
 		if fencingEnabled {
 			lease, ok, err := replication.TryAcquireWriteLease()

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -139,7 +140,7 @@ func loadConfig() (*config, error) {
 
 // IsReplicaReadOnly reports whether the configured replica must reject writes.
 func IsReplicaReadOnly() bool {
-	readOnly, _, err := WriteProtection()
+	readOnly, _, _, err := WriteProtection()
 	if err != nil {
 		log.Error("Invalid [replicate] configuration; denying writes: %v", err)
 		return true
@@ -147,11 +148,17 @@ func IsReplicaReadOnly() bool {
 	return readOnly
 }
 
-// WriteProtection returns the write policy for the current instance.
-func WriteProtection() (readOnly, fencingEnabled bool, err error) {
+// WriteProtection reports replica read-only status, SSH fencing configuration, and pending primary recovery.
+func WriteProtection() (readOnly, fencingEnabled, primaryRecoveryPending bool, err error) {
 	cfg, err := loadConfig()
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
-	return cfg.Enabled && cfg.Mode == modeReplica, cfg.Enabled && cfg.ControlToken != "", nil
+	readOnly = cfg.Enabled && cfg.Mode == modeReplica
+	fencingEnabled = cfg.Enabled && cfg.ControlToken != ""
+	if cfg.Enabled && cfg.Mode == modePrimary {
+		_, checkpointErr := os.Lstat(primaryOutageCheckpointPath(cfg.SnapshotDir))
+		primaryRecoveryPending = checkpointErr == nil || !os.IsNotExist(checkpointErr)
+	}
+	return readOnly, fencingEnabled, primaryRecoveryPending, nil
 }

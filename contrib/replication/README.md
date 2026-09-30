@@ -66,7 +66,8 @@ A final session is automatically aborted and the primary restarted when
 `FINAL_SESSION_TIMEOUT` expires or the control service stops. `SNAPSHOT_TIMEOUT`
 bounds manifest scans and does not limit primary recovery retries. If starting the
 primary fails, recovery retries until it succeeds or the control service stops;
-the persisted outage checkpoint lets the next startup continue recovery.
+the persisted outage checkpoint lets the next startup continue recovery. SSH write commands remain blocked while
+that checkpoint exists, including after the cross-process fence is released for recovery retries.
 
 ## Control API
 
