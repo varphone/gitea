@@ -17,9 +17,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"gitea.dev/modules/json"
+	"gitea.dev/modules/log"
 	"gitea.dev/modules/setting"
 )
 
@@ -245,6 +248,7 @@ func scanPathError(rel string, err error) error {
 }
 
 func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *SnapshotManifest, verifyAll bool) (*SnapshotManifest, error) {
+	scanStarted := time.Now()
 	rootInfo, err := os.Stat(root)
 	if err != nil {
 		return nil, err
@@ -262,6 +266,25 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 			baseEntries[entry.Path] = entry
 		}
 	}
+	var entriesSeen, filesSeen, filesCompleted, filesReused, filesChunked, contentBytesSeen atomic.Int64
+	progressDone := make(chan struct{})
+	var progressWorkers sync.WaitGroup
+	progressWorkers.Go(func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-progressDone:
+				return
+			case <-ticker.C:
+				log.Info("Replication tree scan progress: entries_seen=%d files_seen=%d files_completed=%d reused_files=%d chunked_files=%d content_bytes_seen=%d verify_all=%t elapsed=%s", entriesSeen.Load(), filesSeen.Load(), filesCompleted.Load(), filesReused.Load(), filesChunked.Load(), contentBytesSeen.Load(), verifyAll, time.Since(scanStarted))
+			}
+		}
+	})
+	defer func() {
+		close(progressDone)
+		progressWorkers.Wait()
+	}()
 	err = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			rel, err := filepath.Rel(root, path)
@@ -277,6 +300,7 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 		if err != nil || rel == "." {
 			return err
 		}
+		entriesSeen.Add(1)
 		rel = filepath.ToSlash(rel)
 		e := TreeEntry{Path: rel, Mode: uint32(info.Mode().Perm())}
 		switch {
@@ -294,6 +318,11 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 			}
 		case info.Mode().IsRegular():
 			e.Type, e.Size = "file", info.Size()
+			if m.Size > math.MaxInt64-e.Size {
+				return errors.New("manifest logical size overflow")
+			}
+			filesSeen.Add(1)
+			contentBytesSeen.Add(e.Size)
 			e.ModTimeNS, e.ChangeID = info.ModTime().UnixNano(), fileChangeID(info)
 			old, hasOld := baseEntries[rel]
 			metadataUnchanged := hasOld && old.Type == "file" && old.Size == info.Size() &&
@@ -303,6 +332,8 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 				e.Chunks = old.Chunks
 				m.Size += e.Size
 				m.Files = append(m.Files, e)
+				filesCompleted.Add(1)
+				filesReused.Add(1)
 				return nil
 			}
 			beforeSize, beforeTime, beforeChangeID := info.Size(), info.ModTime(), e.ChangeID
@@ -321,6 +352,8 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 				return fmt.Errorf("content verification failed with unchanged metadata: %s", rel)
 			}
 			m.Size += e.Size
+			filesCompleted.Add(1)
+			filesChunked.Add(1)
 		default:
 			return fmt.Errorf("unsupported filesystem entry %q", rel)
 		}
