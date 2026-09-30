@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"gitea.dev/modules/json"
 	"gitea.dev/modules/log"
@@ -402,13 +403,19 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 			baseEntries[entry.Path] = entry
 		}
 	}
-	var manifestSizeLowerBound int64
+	var manifestEntriesSize int64
 	appendManifestEntry := func(entry TreeEntry) error {
-		entrySize := treeEntryEncodedSizeLowerBound(&entry)
-		if entrySize > int64(maxManifestSize)-manifestSizeLowerBound {
+		entrySize, err := treeEntryEncodedSize(&entry)
+		if err != nil {
+			return err
+		}
+		if len(m.Files) > 0 {
+			entrySize++
+		}
+		if entrySize > int64(maxManifestSize)-manifestEntriesSize {
 			return errManifestTooLarge
 		}
-		manifestSizeLowerBound += entrySize
+		manifestEntriesSize += entrySize
 		m.Files = append(m.Files, entry)
 		return nil
 	}
@@ -596,22 +603,114 @@ func (w *manifestSizeWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-func treeEntryEncodedSizeLowerBound(entry *TreeEntry) int64 {
-	size := int64(30 + len(entry.Path) + len(entry.Type) + len(entry.ChangeID) + len(entry.LocalChangeID) + len(entry.LinkTarget))
-	if entry.LocalChangeID != "" {
-		size += int64(len(`,"local_change_id":""`))
-	}
-	for _, chunk := range entry.Chunks {
-		chunkSize := int64(31 + len(chunk.Hash))
-		if chunkSize > int64(maxManifestSize)-size {
-			return int64(maxManifestSize) + 1
+func encodedJSONStringSize(value string) (int64, error) {
+	needsMarshal := false
+	for offset := 0; offset < len(value); {
+		if value[offset] < utf8.RuneSelf {
+			char := value[offset]
+			if char < 0x20 || char == '"' || char == '\\' || char == '<' || char == '>' || char == '&' {
+				needsMarshal = true
+				break
+			}
+			offset++
+			continue
 		}
-		size += chunkSize
+		r, width := utf8.DecodeRuneInString(value[offset:])
+		if (r == utf8.RuneError && width == 1) || r == '\u2028' || r == '\u2029' {
+			needsMarshal = true
+			break
+		}
+		offset += width
 	}
-	if len(entry.Chunks) > 0 {
-		size += 11
+	if needsMarshal {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return 0, err
+		}
+		return int64(len(encoded)), nil
+	}
+	return int64(len(value) + 2), nil
+}
+
+func decimalSize(value uint64) int64 {
+	size := int64(1)
+	for value >= 10 {
+		value /= 10
+		size++
 	}
 	return size
+}
+
+func signedDecimalSize(value int64) int64 {
+	if value < 0 {
+		return decimalSize(uint64(-(value+1))+1) + 1
+	}
+	return decimalSize(uint64(value))
+}
+
+func treeEntryEncodedSize(entry *TreeEntry) (int64, error) {
+	const oversized = int64(maxManifestSize) + 1
+	size := int64(0)
+	var sizeErr error
+	add := func(value int64) bool {
+		if value < 0 || value > int64(maxManifestSize)-size {
+			size = oversized
+			sizeErr = errManifestTooLarge
+			return false
+		}
+		size += value
+		return true
+	}
+	addString := func(value string) bool {
+		encodedSize, err := encodedJSONStringSize(value)
+		if err != nil {
+			sizeErr = err
+			return false
+		}
+		return add(encodedSize)
+	}
+	if !add(int64(len(`{"path":`))) || !addString(entry.Path) ||
+		!add(int64(len(`,"type":`))) || !addString(entry.Type) ||
+		!add(int64(len(`,"mode":`))) || !add(decimalSize(uint64(entry.Mode))) {
+		return oversized, sizeErr
+	}
+	if entry.Size != 0 && (!add(int64(len(`,"size":`))) || !add(signedDecimalSize(entry.Size))) {
+		return oversized, sizeErr
+	}
+	if entry.ModTimeNS != 0 && (!add(int64(len(`,"mtime_ns":`))) || !add(signedDecimalSize(entry.ModTimeNS))) {
+		return oversized, sizeErr
+	}
+	if entry.ChangeID != "" && (!add(int64(len(`,"change_id":`))) || !addString(entry.ChangeID)) {
+		return oversized, sizeErr
+	}
+	if entry.LocalChangeID != "" && (!add(int64(len(`,"local_change_id":`))) || !addString(entry.LocalChangeID)) {
+		return oversized, sizeErr
+	}
+	if entry.LinkTarget != "" && (!add(int64(len(`,"link_target":`))) || !addString(entry.LinkTarget)) {
+		return oversized, sizeErr
+	}
+	if len(entry.Chunks) > 0 {
+		if !add(int64(len(`,"chunks":[`))) {
+			return oversized, sizeErr
+		}
+		for i, chunk := range entry.Chunks {
+			if i > 0 && !add(1) {
+				return oversized, sizeErr
+			}
+			if !add(int64(len(`{"hash":`))) || !addString(chunk.Hash) ||
+				!add(int64(len(`,"offset":`))) || !add(signedDecimalSize(chunk.Offset)) ||
+				!add(int64(len(`,"size":`))) || !add(signedDecimalSize(chunk.Size)) || !add(1) {
+				return oversized, sizeErr
+			}
+		}
+		if !add(1) {
+			return oversized, sizeErr
+		}
+	}
+	if !add(1) {
+		return oversized, sizeErr
+	}
+	return size, nil
 }
 
 func writeManifestJSON(writer io.Writer, manifest *SnapshotManifest, clearDigest bool) error {
@@ -645,7 +744,10 @@ func writeManifestJSON(writer io.Writer, manifest *SnapshotManifest, clearDigest
 		end := start
 		minimumSize := int64(0)
 		for end < len(files) {
-			entrySize := treeEntryEncodedSizeLowerBound(&files[end])
+			entrySize, err := treeEntryEncodedSize(&files[end])
+			if err != nil {
+				return err
+			}
 			if end > 0 {
 				entrySize++
 			}
