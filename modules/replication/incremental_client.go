@@ -636,12 +636,14 @@ func latestTrustedReadyManifest(snapshotDir, token string) *SnapshotManifest {
 	}
 	var latest *SnapshotManifest
 	for _, path := range paths {
-		id := strings.TrimSuffix(filepath.Base(path), ".json")
-		if !validSnapshotID(id) {
+		name := filepath.Base(path)
+		id := strings.TrimSuffix(name, ".json")
+		isBaseline := name == baselineManifestName
+		if !isBaseline && !validSnapshotID(id) {
 			continue
 		}
 		manifest, err := loadTrustedManifest(path, token, "ready")
-		if err != nil || manifest.ID != id {
+		if err != nil || (!isBaseline && manifest.ID != id) {
 			continue
 		}
 		if newerManifest(manifest, latest) {
