@@ -1497,7 +1497,9 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 						}
 						if err := os.Link(source, dst); err == nil {
 							linkedInfo, statErr := os.Lstat(dst)
-							if statErr == nil && linkedInfo.Mode().IsRegular() && os.SameFile(sourceInfo, linkedInfo) {
+							if statErr == nil && linkedInfo.Mode().IsRegular() && os.SameFile(sourceInfo, linkedInfo) &&
+								linkedInfo.Size() == entry.Size && uint32(linkedInfo.Mode().Perm()) == entry.Mode &&
+								linkedInfo.ModTime().UnixNano() == entry.ModTimeNS {
 								captureIdentity(entryIndex, linkedInfo)
 								sourceFilesLinked++
 								continue
