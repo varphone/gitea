@@ -147,7 +147,7 @@ func (s *controlServer) startPrimary() error {
 		return fmt.Errorf("wait for primary service %s readiness: %w", s.cfg.GiteaServiceName, err)
 	}
 	if err := clearPrimaryOutageCheckpoint(s.cfg.SnapshotDir); err != nil {
-		log.Warn("Clear primary outage recovery checkpoint after service readiness failed: %v", err)
+		return fmt.Errorf("clear primary outage recovery checkpoint: %w", err)
 	}
 	return nil
 }
