@@ -629,6 +629,16 @@ func (s *controlServer) syncSnapshot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		data, err := readChunk(s.root(), location, value)
+		if err != nil {
+			for _, alternate := range s.getTaskChunkAlternates(id, value) {
+				data, err = readChunk(s.root(), alternate, value)
+				if err == nil {
+					log.Debug("Served replication chunk from alternate manifest location: snapshot=%s hash=%s path=%s", id, value, alternate.Path)
+					break
+				}
+				log.Debug("Alternate replication chunk location failed: snapshot=%s hash=%s path=%s error=%v", id, value, alternate.Path, err)
+			}
+		}
 		s.chunkMu.RUnlock()
 		chunkLockHeld = false
 		if err != nil {

@@ -492,6 +492,46 @@ func indexManifest(m *SnapshotManifest) map[string]chunkLocation {
 	return index
 }
 
+func indexManifestAlternates(m *SnapshotManifest, primary map[string]chunkLocation) map[string][]chunkLocation {
+	alternates := make(map[string][]chunkLocation)
+	for _, entry := range m.Files {
+		for _, chunk := range entry.Chunks {
+			first, ok := primary[chunk.Hash]
+			if !ok || (first.Path == entry.Path && first.Offset == chunk.Offset) {
+				continue
+			}
+			locations := alternates[chunk.Hash]
+			if entry.Path != first.Path {
+				pathSeen := false
+				for _, location := range locations {
+					if location.Path == entry.Path {
+						pathSeen = true
+						break
+					}
+				}
+				if pathSeen {
+					continue
+				}
+			}
+			candidate := chunkLocation{entry.Path, chunk.Offset, chunk.Size}
+			if len(locations) < maxChunkSourceAlternates {
+				alternates[chunk.Hash] = append(locations, candidate)
+				continue
+			}
+			if entry.Path != first.Path {
+				for i := range slices.Backward(locations) {
+					if locations[i].Path == first.Path {
+						locations[i] = candidate
+						alternates[chunk.Hash] = locations
+						break
+					}
+				}
+			}
+		}
+	}
+	return alternates
+}
+
 func manifestChunkSet(m *SnapshotManifest) map[string]struct{} {
 	chunks := make(map[string]struct{})
 	for _, entry := range m.Files {

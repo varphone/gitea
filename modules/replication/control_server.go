@@ -37,6 +37,7 @@ const (
 	syncJobsPath             = "/api/v1/replication/sync-jobs"
 	maxSyncJobRequestSize    = 1 << 20
 	maxConcurrentChunkServes = 8
+	maxChunkSourceAlternates = 2
 	minChunkCompressionSave  = 5
 	maxPooledChunkGzipBuffer = 2 << 20
 )
@@ -81,6 +82,7 @@ type controlServer struct {
 	session                *finalSyncSession
 	dataRoot               string
 	chunkSlots             chan struct{}
+	taskChunkAlternates    map[string]map[string][]chunkLocation
 }
 
 func (s *controlServer) root() string {
@@ -113,7 +115,8 @@ func ServeControl(ctx context.Context) error {
 	}
 	s := &controlServer{
 		cfg: cfg, jobs: jobs, taskManifests: map[string]*SnapshotManifest{},
-		taskChunkIndexes: map[string]map[string]chunkLocation{}, chunkSlots: make(chan struct{}, maxConcurrentChunkServes),
+		taskChunkIndexes: map[string]map[string]chunkLocation{}, taskChunkAlternates: map[string]map[string][]chunkLocation{},
+		chunkSlots: make(chan struct{}, maxConcurrentChunkServes),
 	}
 	removeLegacyArchives(cfg.SnapshotDir)
 	primaryRecoveryRequired := false
@@ -127,7 +130,11 @@ func ServeControl(ctx context.Context) error {
 				continue
 			}
 			s.taskManifests[id] = manifest
-			s.taskChunkIndexes[id] = indexManifest(manifest)
+			index := indexManifest(manifest)
+			s.taskChunkIndexes[id] = index
+			if manifest.State == "preflight" {
+				s.taskChunkAlternates[id] = indexManifestAlternates(manifest, index)
+			}
 			jobs[id] = job
 		case "transferring":
 			primaryRecoveryRequired = true
@@ -361,6 +368,7 @@ func (s *controlServer) prune() {
 			delete(s.jobs, id)
 			delete(s.taskManifests, id)
 			delete(s.taskChunkIndexes, id)
+			delete(s.taskChunkAlternates, id)
 		}
 	}
 }
@@ -382,6 +390,12 @@ func (s *controlServer) getTaskChunkLocation(id, hash string) (chunkLocation, bo
 	index, indexed := s.taskChunkIndexes[id]
 	location, ok := index[hash]
 	return location, ok, indexed
+}
+
+func (s *controlServer) getTaskChunkAlternates(id, hash string) []chunkLocation {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.taskChunkAlternates[id][hash]
 }
 
 func (s *controlServer) tryAcquireChunkSlot() (chan struct{}, bool) {
@@ -409,7 +423,16 @@ func (s *controlServer) setTaskManifest(manifest *SnapshotManifest) {
 	if s.taskChunkIndexes == nil {
 		s.taskChunkIndexes = map[string]map[string]chunkLocation{}
 	}
-	s.taskChunkIndexes[manifest.ID] = indexManifest(&manifestCopy)
+	index := indexManifest(&manifestCopy)
+	s.taskChunkIndexes[manifest.ID] = index
+	if manifestCopy.State == "preflight" {
+		if s.taskChunkAlternates == nil {
+			s.taskChunkAlternates = map[string]map[string][]chunkLocation{}
+		}
+		s.taskChunkAlternates[manifest.ID] = indexManifestAlternates(&manifestCopy, index)
+	} else if s.taskChunkAlternates != nil {
+		delete(s.taskChunkAlternates, manifest.ID)
+	}
 }
 
 func isReplicationTemporaryFile(name string) bool {
