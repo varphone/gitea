@@ -553,39 +553,48 @@ func pollManifestTask(ctx context.Context, client *http.Client, base, token, id,
 	}
 }
 
-func requestChunk(ctx context.Context, client *http.Client, base, token, id, hash string) ([]byte, error) {
+func requestChunk(ctx context.Context, client *http.Client, base, token, id, hash string) ([]byte, int64, error) {
 	operation := fmt.Sprintf("request chunk: snapshot=%s hash=%s", id, hash)
 	for attempt := 1; attempt <= requestRetryLimit; attempt++ {
 		resp, err := doRetryableRequest(ctx, client, http.MethodGet, base+"/api/v1/replication/sync-jobs/"+id+"/chunks/"+hash, token, operation)
 		if err != nil {
-			return nil, err
+			return nil, -1, err
 		}
 		if resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusNotFound {
 			_ = resp.Body.Close()
-			return nil, &chunkChangedError{hash: hash, status: resp.Status}
+			return nil, -1, &chunkChangedError{hash: hash, status: resp.Status}
 		}
 		if resp.StatusCode != http.StatusOK {
 			err := responseStatusError("chunk "+hash, resp)
 			_ = resp.Body.Close()
-			return nil, err
+			return nil, -1, err
 		}
+		encodedBodyBytes := parseEncodedBodyBytes(resp.Header.Get(replicationEncodedBodyBytesHeader))
 		data, err := io.ReadAll(io.LimitReader(resp.Body, chunkMaxSize+1))
 		_ = resp.Body.Close()
 		if err != nil {
 			if attempt < requestRetryLimit && shouldRetryRequestError(err) {
 				if retryErr := waitForRetry(ctx, attempt, operation, err); retryErr != nil {
-					return nil, retryErr
+					return nil, -1, retryErr
 				}
 				continue
 			}
-			return nil, err
+			return nil, -1, err
 		}
 		if len(data) > chunkMaxSize {
-			return nil, errors.New("source chunk exceeds maximum size")
+			return nil, -1, errors.New("source chunk exceeds maximum size")
 		}
-		return data, nil
+		return data, encodedBodyBytes, nil
 	}
-	return nil, errors.New("chunk request retries exhausted")
+	return nil, -1, errors.New("chunk request retries exhausted")
+}
+
+func parseEncodedBodyBytes(value string) int64 {
+	encodedBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || encodedBytes < 0 || encodedBytes > chunkMaxSize {
+		return -1
+	}
+	return encodedBytes
 }
 
 func finishRemoteSession(ctx context.Context, client *http.Client, base, token, id, action string) error {
@@ -920,13 +929,15 @@ func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, tok
 	var cacheShards sync.Map
 	var fetched atomic.Int64
 	var fetchedBytes atomic.Int64
+	var encodedBodyBytes atomic.Int64
+	var encodedBodyMeasurements atomic.Int64
 	var lastProgress atomic.Int64
 	workers.Add(workerCount)
 	for range workerCount {
 		go func() {
 			defer workers.Done()
 			for hash := range jobs {
-				data, err := requestChunk(workerCtx, client, base, token, id, hash)
+				data, encodedBytes, err := requestChunk(workerCtx, client, base, token, id, hash)
 				if err == nil {
 					err = storeChunkForBatch(cacheDir, hash, data)
 				}
@@ -939,6 +950,10 @@ func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, tok
 				}
 				cacheShards.LoadOrStore(hash[:2], struct{}{})
 				count := fetched.Add(1)
+				if encodedBytes >= 0 {
+					encodedBodyBytes.Add(encodedBytes)
+					encodedBodyMeasurements.Add(1)
+				}
 				bytes := fetchedBytes.Add(int64(len(data)))
 				now := time.Now()
 				logProgress := false
@@ -950,7 +965,7 @@ func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, tok
 				if logProgress {
 					elapsed := time.Since(started)
 					rate := transferRateMiBPerSecond(bytes, elapsed)
-					log.Info("Final chunk transfer progress: snapshot=%s fetched_chunks=%d total_chunks=%d payload_bytes=%d/%d average_payload_mib_per_sec=%.2f cached_candidates=%d elapsed=%s", id, count, total, bytes, totalBytes, rate, cached, elapsed)
+					log.Info("Final chunk transfer progress: snapshot=%s fetched_chunks=%d total_chunks=%d payload_bytes=%d/%d server_encoded_body_bytes=%d measured_responses=%d/%d average_payload_mib_per_sec=%.2f cached_candidates=%d elapsed=%s", id, count, total, bytes, totalBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), count, rate, cached, elapsed)
 				}
 			}
 		}()
@@ -972,15 +987,15 @@ sendJobs:
 	elapsed := time.Since(started)
 	bytes := fetchedBytes.Load()
 	if firstErr != nil {
-		log.Error("Final chunk transfer failed: snapshot=%s fetched=%d/%d payload_bytes=%d/%d elapsed=%s error=%v", id, fetched.Load(), len(hashes), bytes, totalBytes, elapsed, firstErr)
+		log.Error("Final chunk transfer failed: snapshot=%s fetched=%d/%d payload_bytes=%d/%d server_encoded_body_bytes=%d measured_responses=%d/%d elapsed=%s error=%v", id, fetched.Load(), len(hashes), bytes, totalBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetched.Load(), elapsed, firstErr)
 		return firstErr
 	}
 	if err := ctx.Err(); err != nil {
-		log.Error("Final chunk transfer canceled: snapshot=%s fetched=%d/%d payload_bytes=%d/%d elapsed=%s error=%v", id, fetched.Load(), len(hashes), bytes, totalBytes, elapsed, err)
+		log.Error("Final chunk transfer canceled: snapshot=%s fetched=%d/%d payload_bytes=%d/%d server_encoded_body_bytes=%d measured_responses=%d/%d elapsed=%s error=%v", id, fetched.Load(), len(hashes), bytes, totalBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetched.Load(), elapsed, err)
 		return err
 	}
 	rate := transferRateMiBPerSecond(bytes, elapsed)
-	log.Info("Final chunk transfer completed: snapshot=%s fetched=%d/%d payload_bytes=%d/%d average_payload_mib_per_sec=%.2f cached_candidates=%d elapsed=%s", id, fetched.Load(), len(hashes), bytes, totalBytes, rate, cached, elapsed)
+	log.Info("Final chunk transfer completed: snapshot=%s fetched=%d/%d payload_bytes=%d/%d server_encoded_body_bytes=%d measured_responses=%d/%d average_payload_mib_per_sec=%.2f cached_candidates=%d elapsed=%s", id, fetched.Load(), len(hashes), bytes, totalBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetched.Load(), rate, cached, elapsed)
 	return nil
 }
 
@@ -989,7 +1004,7 @@ func fetchPreflightChunksConcurrently(ctx context.Context, client *http.Client, 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		log.Info("Finished preflight chunk pass for snapshot %s: fetched=0 payload_bytes=0 reusable_candidates=%d reusable_candidate_payload_bytes=%d deferred=0 total=%d duration=%s", id, cached, cachedBytes, total, preparationDuration)
+		log.Info("Finished preflight chunk pass for snapshot %s: fetched=0 payload_bytes=0 server_encoded_body_bytes=0 measured_responses=0/0 reusable_candidates=%d reusable_candidate_payload_bytes=%d deferred=0 total=%d duration=%s", id, cached, cachedBytes, total, preparationDuration)
 		return nil
 	}
 	started := time.Now()
@@ -1003,6 +1018,8 @@ func fetchPreflightChunksConcurrently(ctx context.Context, client *http.Client, 
 	var firstErrOnce sync.Once
 	var fetched atomic.Int64
 	var fetchedBytes atomic.Int64
+	var encodedBodyBytes atomic.Int64
+	var encodedBodyMeasurements atomic.Int64
 	var deferred atomic.Int64
 	var cacheShards sync.Map
 	var lastProgress atomic.Int64
@@ -1015,7 +1032,7 @@ func fetchPreflightChunksConcurrently(ctx context.Context, client *http.Client, 
 				if stopAfterChurn.Load() {
 					continue
 				}
-				data, err := requestChunk(workerCtx, client, base, token, id, hash)
+				data, encodedBytes, err := requestChunk(workerCtx, client, base, token, id, hash)
 				if err != nil {
 					if stopAfterChurn.Load() && errors.Is(err, context.Canceled) {
 						return
@@ -1050,6 +1067,10 @@ func fetchPreflightChunksConcurrently(ctx context.Context, client *http.Client, 
 				}
 				cacheShards.LoadOrStore(hash[:2], struct{}{})
 				count := fetched.Add(1)
+				if encodedBytes >= 0 {
+					encodedBodyBytes.Add(encodedBytes)
+					encodedBodyMeasurements.Add(1)
+				}
 				bytes := fetchedBytes.Add(int64(len(data)))
 				now := time.Now()
 				logProgress := false
@@ -1061,7 +1082,7 @@ func fetchPreflightChunksConcurrently(ctx context.Context, client *http.Client, 
 				if logProgress {
 					elapsed := time.Since(started)
 					rate := transferRateMiBPerSecond(bytes, elapsed)
-					log.Info("Preflight chunk transfer progress: snapshot=%s fetched_chunks=%d/%d payload_bytes=%d expected_payload_bytes=%d average_payload_mib_per_sec=%.2f reusable_candidates=%d deferred=%d elapsed=%s", id, count, total, bytes, expectedBytes, rate, cached, deferred.Load(), elapsed)
+					log.Info("Preflight chunk transfer progress: snapshot=%s fetched_chunks=%d/%d payload_bytes=%d expected_payload_bytes=%d server_encoded_body_bytes=%d measured_responses=%d/%d average_payload_mib_per_sec=%.2f reusable_candidates=%d deferred=%d elapsed=%s", id, count, total, bytes, expectedBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), count, rate, cached, deferred.Load(), elapsed)
 				}
 			}
 		}()
@@ -1086,17 +1107,17 @@ sendJobs:
 	elapsed := preparationDuration + time.Since(started)
 	fetchedCount, bytes, deferredCount := fetched.Load(), fetchedBytes.Load(), deferred.Load()
 	if firstErr != nil {
-		log.Error("Preflight chunk transfer failed: snapshot=%s hash=%s fetched=%d/%d payload_bytes=%d expected_payload_bytes=%d cached_candidates=%d deferred=%d elapsed=%s error=%v", id, firstHash, fetchedCount, len(hashes), bytes, expectedBytes, cached, deferredCount, elapsed, firstErr)
+		log.Error("Preflight chunk transfer failed: snapshot=%s hash=%s fetched=%d/%d payload_bytes=%d expected_payload_bytes=%d server_encoded_body_bytes=%d measured_responses=%d/%d cached_candidates=%d deferred=%d elapsed=%s error=%v", id, firstHash, fetchedCount, len(hashes), bytes, expectedBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetchedCount, cached, deferredCount, elapsed, firstErr)
 		return firstErr
 	}
 	if err := ctx.Err(); err != nil {
-		log.Error("Preflight chunk transfer canceled: snapshot=%s fetched=%d/%d payload_bytes=%d expected_payload_bytes=%d cached_candidates=%d deferred=%d elapsed=%s error=%v", id, fetchedCount, len(hashes), bytes, expectedBytes, cached, deferredCount, elapsed, err)
+		log.Error("Preflight chunk transfer canceled: snapshot=%s fetched=%d/%d payload_bytes=%d expected_payload_bytes=%d server_encoded_body_bytes=%d measured_responses=%d/%d cached_candidates=%d deferred=%d elapsed=%s error=%v", id, fetchedCount, len(hashes), bytes, expectedBytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetchedCount, cached, deferredCount, elapsed, err)
 		return err
 	}
 	if fetchedCount == 0 && deferredCount > 0 {
 		log.Warn("Finished preflight chunk pass for snapshot %s without caching any chunks; source changed before every fetch (cached=%d deferred=%d total=%d elapsed=%s)", id, cached, deferredCount, total, elapsed)
 	}
-	log.Info("Finished preflight chunk pass for snapshot %s: fetched=%d payload_bytes=%d reusable_candidates=%d reusable_candidate_payload_bytes=%d average_payload_mib_per_sec=%.2f deferred=%d total=%d duration=%s", id, fetchedCount, bytes, cached, cachedBytes, transferRateMiBPerSecond(bytes, elapsed), deferredCount, total, elapsed)
+	log.Info("Finished preflight chunk pass for snapshot %s: fetched=%d payload_bytes=%d server_encoded_body_bytes=%d measured_responses=%d/%d reusable_candidates=%d reusable_candidate_payload_bytes=%d average_payload_mib_per_sec=%.2f deferred=%d total=%d duration=%s", id, fetchedCount, bytes, encodedBodyBytes.Load(), encodedBodyMeasurements.Load(), fetchedCount, cached, cachedBytes, transferRateMiBPerSecond(bytes, elapsed), deferredCount, total, elapsed)
 	return nil
 }
 
@@ -1803,12 +1824,12 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 	stageStarted := time.Now()
 	fetch := func(hash string) ([]byte, error) {
 		started := time.Now()
-		data, err := requestChunk(ctx, client, base, cfg.ControlToken, final.ID, hash)
+		data, encodedBytes, err := requestChunk(ctx, client, base, cfg.ControlToken, final.ID, hash)
 		if err != nil {
 			log.Warn("On-demand final chunk fetch failed: snapshot=%s hash=%s duration=%s error=%v", final.ID, hash, time.Since(started), err)
 			return nil, err
 		}
-		log.Debug("Fetched on-demand final chunk: snapshot=%s hash=%s bytes=%d duration=%s", final.ID, hash, len(data), time.Since(started))
+		log.Debug("Fetched on-demand final chunk: snapshot=%s hash=%s payload_bytes=%d server_encoded_body_bytes=%d encoded_body_measured=%t duration=%s", final.ID, hash, len(data), encodedBytes, encodedBytes >= 0, time.Since(started))
 		return data, nil
 	}
 	if err := buildIncrementalStage(ctx, root, stage, cacheDir, final, previous, fetch); err != nil {

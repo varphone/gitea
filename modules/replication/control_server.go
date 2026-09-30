@@ -34,16 +34,17 @@ type syncJobRequest struct {
 }
 
 const (
-	syncJobsPath              = "/api/v1/replication/sync-jobs"
-	maxSyncJobRequestSize     = 1 << 20
-	maxConcurrentChunkServes  = 8
-	maxTransientFailedJobs    = 64
-	maxChunkSourceAlternates  = 2
-	minChunkCompressionSave   = 5
-	maxPooledChunkGzipBuffer  = 2 << 20
-	chunkCompressionProbeSize = 16 << 10
-	chunkCompressionProbes    = 8
-	primaryOutageCheckpoint   = ".primary-outage"
+	syncJobsPath                      = "/api/v1/replication/sync-jobs"
+	maxSyncJobRequestSize             = 1 << 20
+	maxConcurrentChunkServes          = 8
+	maxTransientFailedJobs            = 64
+	maxChunkSourceAlternates          = 2
+	minChunkCompressionSave           = 5
+	maxPooledChunkGzipBuffer          = 2 << 20
+	chunkCompressionProbeSize         = 16 << 10
+	chunkCompressionProbes            = 8
+	primaryOutageCheckpoint           = ".primary-outage"
+	replicationEncodedBodyBytesHeader = "X-Replication-Server-Encoded-Body-Bytes"
 )
 
 var chunkGzipBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
@@ -742,6 +743,7 @@ func writeChunk(w http.ResponseWriter, r *http.Request, data []byte) (int, bool,
 			w.Header().Set("Content-Encoding", "gzip")
 			expectedBytes := gzipData.Len()
 			w.Header().Set("Content-Length", strconv.Itoa(expectedBytes))
+			w.Header().Set(replicationEncodedBodyBytesHeader, strconv.Itoa(expectedBytes))
 			responseBodyBytes, err := w.Write(gzipData.Bytes())
 			releaseChunkGzipBuffer(gzipData)
 			if err == nil && responseBodyBytes != expectedBytes {
@@ -752,6 +754,7 @@ func writeChunk(w http.ResponseWriter, r *http.Request, data []byte) (int, bool,
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set(replicationEncodedBodyBytesHeader, strconv.Itoa(len(data)))
 	responseBodyBytes, err := w.Write(data)
 	if err == nil && responseBodyBytes != len(data) {
 		err = io.ErrShortWrite
