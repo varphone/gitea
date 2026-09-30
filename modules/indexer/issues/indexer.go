@@ -124,8 +124,9 @@ func InitIssueIndexer(syncReindex bool) {
 			log.Info("PID: %d Issue Indexer closed", os.Getpid())
 		})
 
-		if readOnlyReplica {
-			log.Info("Replication replica mode is active; issue index updates are paused")
+		runWorkers := !readOnlyReplica || setting.Indexer.IssueType == "bleve"
+		if !runWorkers {
+			log.Info("Replication replica mode is active; shared issue index updates are paused")
 		} else {
 			// Start processing the queue
 			go graceful.GetManager().RunWithCancel(issueIndexerQueue)

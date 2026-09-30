@@ -193,8 +193,9 @@ func Init() {
 
 		globalIndexer.Store(&rIndexer)
 
-		if readOnlyReplica {
-			log.Info("Replication replica mode is active; code index updates are paused")
+		runWorkers := !readOnlyReplica || setting.Indexer.RepoType == "bleve"
+		if !runWorkers {
+			log.Info("Replication replica mode is active; shared code index updates are paused")
 		} else {
 			// Start processing the queue
 			go graceful.GetManager().RunWithCancel(indexerQueue)
