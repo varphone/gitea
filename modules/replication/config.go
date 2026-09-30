@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -82,6 +83,9 @@ func loadConfig() (*config, error) {
 	}
 	if len(cfg.ControlToken) < 32 {
 		return nil, errors.New("[replicate] CONTROL_TOKEN must contain at least 32 bytes")
+	}
+	if !filepath.IsAbs(cfg.SnapshotDir) {
+		return nil, errors.New("[replicate] SNAPSHOT_DIR must be an absolute path")
 	}
 	host, _, err := net.SplitHostPort(cfg.ControlListen)
 	if err != nil {

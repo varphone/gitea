@@ -18,7 +18,9 @@ Git, LFS, or attachment data. On the standby it also contains a temporary
 content-addressed chunk cache while a synchronization is in progress. Verified
 chunks survive an interrupted run for resumption. Before each preflight and
 final chunk transfer, stale chunks outside the current target manifest are
-pruned; the cache is removed after a successful atomic installation.
+pruned; the cache is removed after a successful atomic installation. Set
+`SNAPSHOT_DIR` to an absolute path so every Gitea and replication process uses
+the same checkpoint and cache directory regardless of its working directory.
 On the standby, `SNAPSHOT_DIR` and
 `APP_WORK_PATH` must be on the same local filesystem.
 
