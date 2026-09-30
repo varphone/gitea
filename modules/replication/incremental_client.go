@@ -1852,6 +1852,61 @@ func persistStandbyManifest(snapshotDir string, manifest *SnapshotManifest) erro
 	return writeManifestAt(manifestPath(snapshotDir, manifest.ID), manifest)
 }
 
+func matchesCompletedFinalManifest(final, ready *SnapshotManifest) bool {
+	if final == nil || ready == nil || final.ID != ready.ID || final.State != "transferring" || ready.State != "ready" {
+		return false
+	}
+	transfer := *ready
+	transfer.Snapshot.State = "transferring"
+	transfer.Snapshot.Error = ""
+	digest, err := manifestDigest(&transfer)
+	return err == nil && digest == final.SHA256
+}
+
+func signRestoredStandbyManifest(manifest *SnapshotManifest, token string) error {
+	manifest.State = "ready"
+	manifest.Error = ""
+	if err := signIncrementalManifest(manifest, token); err != nil {
+		return err
+	}
+	if err := writeManifestJSON(io.Discard, manifest, false); errors.Is(err, errManifestTooLarge) {
+		for i := range manifest.Files {
+			manifest.Files[i].LocalChangeID = ""
+		}
+		log.Warn("Omit local standby file identities because the ready manifest exceeds its size limit: snapshot=%s", manifest.ID)
+		if err := signIncrementalManifest(manifest, token); err != nil {
+			return err
+		}
+		return writeManifestJSON(io.Discard, manifest, false)
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
+func persistReadyStandbySync(cfg *config, manifest *SnapshotManifest, cacheDir string) error {
+	if err := signRestoredStandbyManifest(manifest, cfg.ControlToken); err != nil {
+		return err
+	}
+	if err := persistStandbyManifest(cfg.SnapshotDir, manifest); err != nil {
+		return err
+	}
+	if err := writeManifestAt(filepath.Join(cfg.SnapshotDir, "current.json"), manifest); err != nil {
+		return err
+	}
+	if err := os.Remove(stageCheckpointPath(cfg)); err != nil && !os.IsNotExist(err) {
+		log.Warn("Remove completed staging checkpoint: snapshot=%s error=%v", manifest.ID, err)
+	}
+	if err := pruneFailedRestoreStages(cfg.SnapshotDir, 0); err != nil {
+		log.Warn("Remove failed standby restore stages after successful sync: snapshot=%s error=%v", manifest.ID, err)
+	}
+	pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention, cfg.ControlToken)
+	if err := os.RemoveAll(cacheDir); err != nil {
+		log.Warn("Remove completed incremental cache: snapshot=%s error=%v", manifest.ID, err)
+	}
+	return nil
+}
+
 type stageCheckpoint struct {
 	SnapshotID  string `json:"snapshot_id"`
 	ManifestSHA string `json:"manifest_sha"`
@@ -2079,42 +2134,9 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 	}
 	log.Info("Remote final sync session completed: snapshot=%s duration=%s", final.ID, time.Since(remoteFinishStarted))
 	completed = true
-	if err := os.Remove(stageCheckpointPath(cfg)); err != nil && !os.IsNotExist(err) {
-		log.Warn("Remove completed staging checkpoint: snapshot=%s error=%v", final.ID, err)
-	}
-	final.State = "ready"
-	manifestErr := signIncrementalManifest(final, cfg.ControlToken)
-	if manifestErr == nil {
-		manifestErr = writeManifestJSON(io.Discard, final, false)
-	}
-	if errors.Is(manifestErr, errManifestTooLarge) {
-		for i := range final.Files {
-			final.Files[i].LocalChangeID = ""
-		}
-		log.Warn("Omit local standby file identities because the ready manifest exceeds its size limit: snapshot=%s", final.ID)
-		manifestErr = signIncrementalManifest(final, cfg.ControlToken)
-		if manifestErr == nil {
-			manifestErr = writeManifestJSON(io.Discard, final, false)
-		}
-	}
-	if manifestErr != nil {
-		log.Error("Sign restored standby manifest failed: snapshot=%s error=%v", final.ID, manifestErr)
-		return manifestErr
-	}
-	if err := persistStandbyManifest(cfg.SnapshotDir, final); err != nil {
-		log.Error("Persist restored standby manifest failed: snapshot=%s error=%v", final.ID, err)
+	if err := persistReadyStandbySync(cfg, final, cacheDir); err != nil {
+		log.Error("Persist completed standby sync failed: snapshot=%s error=%v", final.ID, err)
 		return err
-	}
-	if err := writeManifestAt(filepath.Join(cfg.SnapshotDir, "current.json"), final); err != nil {
-		log.Error("Persist current standby manifest failed: snapshot=%s error=%v", final.ID, err)
-		return err
-	}
-	if err := pruneFailedRestoreStages(cfg.SnapshotDir, 0); err != nil {
-		log.Warn("Remove failed standby restore stages after successful sync: snapshot=%s error=%v", final.ID, err)
-	}
-	pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention, cfg.ControlToken)
-	if err := os.RemoveAll(cacheDir); err != nil {
-		log.Warn("Remove completed incremental cache: snapshot=%s error=%v", final.ID, err)
 	}
 	log.Info("Standby restore completed successfully: snapshot=%s total_duration=%s", final.ID, time.Since(syncStarted))
 	return nil
@@ -2133,6 +2155,31 @@ func resumeFinalSync(ctx context.Context, cfg *config, base string, client *http
 		}
 		log.Error("Cannot check remote status for final sync checkpoint: snapshot=%s error=%v", final.ID, err)
 		return true, err
+	}
+	if status.State == "ready" {
+		ready, err := requestManifestByID(ctx, client, base, cfg.ControlToken, final.ID, "ready")
+		if err != nil {
+			log.Error("Cannot load completed remote manifest for final sync checkpoint: snapshot=%s error=%v", final.ID, err)
+			return true, err
+		}
+		if !matchesCompletedFinalManifest(final, ready) {
+			log.Warn("Completed remote final sync does not match local checkpoint: snapshot=%s; starting a new sync", final.ID)
+			return false, nil
+		}
+		if err := verifyRestoredFileIdentities(ctx, filepath.Clean(setting.AppWorkPath), ready); err != nil {
+			if ctx.Err() != nil {
+				return true, ctx.Err()
+			}
+			log.Warn("Local data does not match completed final sync checkpoint: snapshot=%s error=%v; starting a new sync", final.ID, err)
+			return false, nil
+		}
+		recordLocalChangeIDs(filepath.Clean(setting.AppWorkPath), ready)
+		if err := persistReadyStandbySync(cfg, ready, cacheDir); err != nil {
+			log.Error("Persist recovered completed standby sync failed: snapshot=%s error=%v", final.ID, err)
+			return true, err
+		}
+		log.Info("Recovered completed standby sync without retransferring data: snapshot=%s", final.ID)
+		return true, nil
 	}
 	if status.State != "transferring" {
 		log.Info("Remote final sync checkpoint is no longer active: snapshot=%s state=%s; starting a new sync", final.ID, status.State)
