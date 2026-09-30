@@ -552,10 +552,13 @@ func (s *controlServer) finishSession(id string, success bool) error {
 		}
 		jobCopy := *job
 		s.mu.Unlock()
-		manifest, loadErr := loadManifestFile(manifestPath(s.cfg.SnapshotDir, id))
-		if loadErr != nil {
-			log.Warn("Cannot load finalized replication manifest %s from disk; using in-memory copy: %v", id, loadErr)
-			manifest = s.getTaskManifest(id)
+		manifest := s.getTaskManifest(id)
+		var loadErr error
+		if manifest == nil {
+			manifest, loadErr = loadTrustedManifest(manifestPath(s.cfg.SnapshotDir, id), s.cfg.ControlToken, "transferring")
+			if loadErr != nil {
+				log.Warn("Cannot load trusted replication manifest %s during finalization: %v", id, loadErr)
+			}
 		}
 		var manifestErr error
 		if manifest == nil {
