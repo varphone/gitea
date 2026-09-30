@@ -48,35 +48,6 @@ var syncBusyRetryDelay = time.Second
 
 var errRemoteSnapshotUnavailable = errors.New("remote snapshot is unavailable")
 
-func startPeriodicProgressLog(interval time.Duration, logProgress func()) func() {
-	done := make(chan struct{})
-	var worker sync.WaitGroup
-	worker.Go(func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				select {
-				case <-done:
-					return
-				default:
-					logProgress()
-				}
-			}
-		}
-	})
-	var stop sync.Once
-	return func() {
-		stop.Do(func() {
-			close(done)
-			worker.Wait()
-		})
-	}
-}
-
 type chunkChangedError struct {
 	hash   string
 	status string
@@ -1410,7 +1381,7 @@ func recordLocalChangeIDs(root string, manifest *SnapshotManifest) {
 	var filesProcessed, recorded, skipped atomic.Int64
 	var firstSkip error
 	started := time.Now()
-	stopProgress := startPeriodicProgressLog(30*time.Second, func() {
+	stopProgress := startPeriodicProgressLog(func() {
 		log.Info("Recording standby file identities progress: snapshot=%s files_processed=%d/%d recorded=%d skipped=%d elapsed=%s", manifest.ID, filesProcessed.Load(), filesTotal, recorded.Load(), skipped.Load(), time.Since(started))
 	})
 	defer stopProgress()
@@ -1463,7 +1434,7 @@ func verifyRestoredFileIdentities(ctx context.Context, root string, manifest *Sn
 	}
 	var filesChecked, identityMatches, contentChecks, localIdentities atomic.Int64
 	started := time.Now()
-	stopProgress := startPeriodicProgressLog(30*time.Second, func() {
+	stopProgress := startPeriodicProgressLog(func() {
 		log.Info("Standby readiness file verification progress: snapshot=%s files_checked=%d/%d identity_matches=%d content_hashed=%d local_identities=%d elapsed=%s", manifest.ID, filesChecked.Load(), filesTotal, identityMatches.Load(), contentChecks.Load(), localIdentities.Load(), time.Since(started))
 	})
 	defer stopProgress()
@@ -1665,7 +1636,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 		}
 	}
 	var progressFilesStarted, progressFilesCompleted, progressChunksWritten, progressPayloadBytes atomic.Int64
-	stopProgress := startPeriodicProgressLog(30*time.Second, func() {
+	stopProgress := startPeriodicProgressLog(func() {
 		log.Info("Incremental staging progress: snapshot=%s files_started=%d files_completed=%d/%d chunks_written=%d chunk_payload_bytes_written=%d elapsed=%s", manifest.ID, progressFilesStarted.Load(), progressFilesCompleted.Load(), fileCount, progressChunksWritten.Load(), progressPayloadBytes.Load(), time.Since(stageStarted))
 	})
 	defer stopProgress()

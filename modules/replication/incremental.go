@@ -921,6 +921,35 @@ func indexManifest(m *SnapshotManifest) map[string]chunkLocation {
 	return index
 }
 
+func startPeriodicProgressLog(logProgress func()) func() {
+	done := make(chan struct{})
+	var worker sync.WaitGroup
+	worker.Go(func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				select {
+				case <-done:
+					return
+				default:
+					logProgress()
+				}
+			}
+		}
+	})
+	var stop sync.Once
+	return func() {
+		stop.Do(func() {
+			close(done)
+			worker.Wait()
+		})
+	}
+}
+
 func indexManifestContext(ctx context.Context, m *SnapshotManifest) (map[string]chunkLocation, error) {
 	index := make(map[string]chunkLocation)
 	for _, e := range m.Files {
@@ -942,6 +971,12 @@ func indexManifestContext(ctx context.Context, m *SnapshotManifest) (map[string]
 func indexManifestDeltaContext(ctx context.Context, manifest *SnapshotManifest, base map[string]chunkLocation) (map[string]chunkLocation, map[string][]chunkLocation, error) {
 	delta := make(map[string]chunkLocation)
 	alternates := make(map[string][]chunkLocation)
+	var processedEntries, processedChunks, uniqueHashes atomic.Int64
+	started := time.Now()
+	stopProgress := startPeriodicProgressLog(func() {
+		log.Info("Indexing replication manifest chunks progress: snapshot=%s index_kind=delta entries_processed=%d/%d chunks_processed=%d unique_hashes_added=%d elapsed=%s", manifest.ID, processedEntries.Load(), len(manifest.Files), processedChunks.Load(), uniqueHashes.Load(), time.Since(started))
+	})
+	defer stopProgress()
 	for _, entry := range manifest.Files {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
@@ -953,20 +988,32 @@ func indexManifestDeltaContext(ctx context.Context, manifest *SnapshotManifest, 
 			candidate := chunkLocation{entry.Path, chunk.Offset, chunk.Size}
 			if primary, seen := delta[chunk.Hash]; seen {
 				addChunkAlternate(alternates, chunk.Hash, primary, candidate)
+				processedChunks.Add(1)
 				continue
 			}
 			if baseLocation, ok := base[chunk.Hash]; ok && baseLocation == candidate {
+				processedChunks.Add(1)
 				continue
 			}
 			delta[chunk.Hash] = candidate
+			uniqueHashes.Add(1)
+			processedChunks.Add(1)
 		}
+		processedEntries.Add(1)
 	}
+	stopProgress()
 	return delta, alternates, nil
 }
 
 func indexManifestWithAlternatesContext(ctx context.Context, m *SnapshotManifest) (map[string]chunkLocation, map[string][]chunkLocation, error) {
 	primary := make(map[string]chunkLocation)
 	alternates := make(map[string][]chunkLocation)
+	var processedEntries, processedChunks, uniqueHashes atomic.Int64
+	started := time.Now()
+	stopProgress := startPeriodicProgressLog(func() {
+		log.Info("Indexing replication manifest chunks progress: snapshot=%s index_kind=full entries_processed=%d/%d chunks_processed=%d unique_hashes=%d elapsed=%s", m.ID, processedEntries.Load(), len(m.Files), processedChunks.Load(), uniqueHashes.Load(), time.Since(started))
+	})
+	defer stopProgress()
 	for _, entry := range m.Files {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
@@ -979,11 +1026,15 @@ func indexManifestWithAlternatesContext(ctx context.Context, m *SnapshotManifest
 			first, ok := primary[chunk.Hash]
 			if !ok {
 				primary[chunk.Hash] = candidate
-				continue
+				uniqueHashes.Add(1)
+			} else {
+				addChunkAlternate(alternates, chunk.Hash, first, candidate)
 			}
-			addChunkAlternate(alternates, chunk.Hash, first, candidate)
+			processedChunks.Add(1)
 		}
+		processedEntries.Add(1)
 	}
+	stopProgress()
 	return primary, alternates, nil
 }
 
