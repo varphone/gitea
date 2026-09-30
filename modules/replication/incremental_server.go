@@ -98,7 +98,14 @@ func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
 			}
 		}
 		manifest, err := loadManifestFile(path)
-		if err != nil || validateManifestIdentity(manifest, s.cfg.ControlToken) != nil {
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Warn("Ignore invalid replication manifest during preflight planning: path=%s error=%v", path, err)
+			}
+			continue
+		}
+		if err := validateManifestIdentity(manifest, s.cfg.ControlToken); err != nil {
+			log.Warn("Ignore untrusted replication manifest during preflight planning: path=%s error=%v", path, err)
 			continue
 		}
 		if _, ok := seenIDs[manifest.ID]; ok {
