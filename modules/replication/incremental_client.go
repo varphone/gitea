@@ -831,6 +831,11 @@ func readCachedChunk(cacheDir, hash string) ([]byte, error) {
 	sum := sha256.Sum256(data)
 	actual := hex.EncodeToString(sum[:])
 	if actual != hash {
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			log.Warn("Remove corrupted replication chunk cache entry failed: hash=%s error=%v", hash, removeErr)
+		} else {
+			log.Warn("Discarded corrupted replication chunk cache entry: hash=%s", hash)
+		}
 		return nil, fmt.Errorf("cached chunk sha256 mismatch: got %s want %s", actual, hash)
 	}
 	return data, nil
