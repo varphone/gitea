@@ -49,14 +49,15 @@ type ChunkDescriptor struct {
 }
 
 type TreeEntry struct {
-	Path       string            `json:"path"`
-	Type       string            `json:"type"`
-	Mode       uint32            `json:"mode"`
-	Size       int64             `json:"size,omitempty"`
-	ModTimeNS  int64             `json:"mtime_ns,omitempty"`
-	ChangeID   string            `json:"change_id,omitempty"`
-	LinkTarget string            `json:"link_target,omitempty"`
-	Chunks     []ChunkDescriptor `json:"chunks,omitempty"`
+	Path          string            `json:"path"`
+	Type          string            `json:"type"`
+	Mode          uint32            `json:"mode"`
+	Size          int64             `json:"size,omitempty"`
+	ModTimeNS     int64             `json:"mtime_ns,omitempty"`
+	ChangeID      string            `json:"change_id,omitempty"`
+	LocalChangeID string            `json:"local_change_id,omitempty"`
+	LinkTarget    string            `json:"link_target,omitempty"`
+	Chunks        []ChunkDescriptor `json:"chunks,omitempty"`
 }
 
 type chunkLocation struct {
@@ -534,7 +535,10 @@ func (w *manifestSizeWriter) Write(data []byte) (int, error) {
 }
 
 func treeEntryEncodedSizeLowerBound(entry *TreeEntry) int64 {
-	size := int64(30 + len(entry.Path) + len(entry.Type) + len(entry.ChangeID) + len(entry.LinkTarget))
+	size := int64(30 + len(entry.Path) + len(entry.Type) + len(entry.ChangeID) + len(entry.LocalChangeID) + len(entry.LinkTarget))
+	if entry.LocalChangeID != "" {
+		size += int64(len(`,"local_change_id":""`))
+	}
 	for _, chunk := range entry.Chunks {
 		chunkSize := int64(32 + len(chunk.Hash))
 		if chunkSize > int64(maxManifestSize)-size {
@@ -682,16 +686,16 @@ func validateIncrementalManifest(m *SnapshotManifest) error {
 	}
 	var logicalSize int64
 	for _, e := range m.Files {
-		if e.Mode > 0o777 || len(e.ChangeID) > 128 {
+		if e.Mode > 0o777 || len(e.ChangeID) > 128 || len(e.LocalChangeID) > 128 {
 			return fmt.Errorf("invalid metadata in %q", e.Path)
 		}
 		switch e.Type {
 		case "dir":
-			if e.Size != 0 || e.LinkTarget != "" || len(e.Chunks) != 0 {
+			if e.Size != 0 || e.LocalChangeID != "" || e.LinkTarget != "" || len(e.Chunks) != 0 {
 				return fmt.Errorf("invalid directory fields in %q", e.Path)
 			}
 		case "symlink":
-			if e.Size != 0 || len(e.Chunks) != 0 {
+			if e.Size != 0 || e.LocalChangeID != "" || len(e.Chunks) != 0 {
 				return fmt.Errorf("invalid symlink fields in %q", e.Path)
 			}
 			if err := validateTreeLink(e.Path, e.LinkTarget); err != nil {
@@ -700,6 +704,9 @@ func validateIncrementalManifest(m *SnapshotManifest) error {
 		case "file":
 			if e.LinkTarget != "" {
 				return fmt.Errorf("invalid file link target in %q", e.Path)
+			}
+			if e.LocalChangeID != "" && m.State != "ready" {
+				return fmt.Errorf("local file identity is only valid in ready manifest %q", e.Path)
 			}
 			var offset int64
 			for _, c := range e.Chunks {

@@ -1072,6 +1072,39 @@ func sameFile(a, b TreeEntry) bool {
 		a.ModTimeNS == b.ModTimeNS && reflect.DeepEqual(a.Chunks, b.Chunks)
 }
 
+func recordLocalChangeIDs(root string, manifest *SnapshotManifest) {
+	recorded, skipped := 0, 0
+	var firstSkip error
+	for i := range manifest.Files {
+		entry := &manifest.Files[i]
+		entry.LocalChangeID = ""
+		if entry.Type != "file" {
+			continue
+		}
+		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(entry.Path)))
+		if err == nil && info.Mode().IsRegular() && info.Size() == entry.Size &&
+			uint32(info.Mode().Perm()) == entry.Mode && info.ModTime().UnixNano() == entry.ModTimeNS {
+			entry.LocalChangeID = fileChangeID(info)
+			if entry.LocalChangeID != "" {
+				recorded++
+				continue
+			}
+			err = errors.New("filesystem does not provide a stable file identity")
+		} else if err == nil {
+			err = errors.New("local file metadata does not match the restored manifest")
+		}
+		skipped++
+		if firstSkip == nil {
+			firstSkip = fmt.Errorf("%s: %w", entry.Path, err)
+		}
+	}
+	if skipped > 0 {
+		log.Warn("Could not record local identities for some standby files: snapshot=%s recorded=%d skipped=%d first_error=%v", manifest.ID, recorded, skipped, firstSkip)
+	} else {
+		log.Info("Recorded standby local file identities: snapshot=%s files=%d", manifest.ID, recorded)
+	}
+}
+
 func reusableWholeFile(path string, entry TreeEntry) bool {
 	_, ok := reusableWholeFileInfo(path, entry)
 	return ok
@@ -1307,8 +1340,8 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			if sameFile(entry, old) {
 				sourceInfo, reusable := reusableWholeFileInfo(source, entry)
 				if reusable {
-					matches := !verifyLocal
-					if verifyLocal {
+					matches := !verifyLocal && old.LocalChangeID != "" && old.LocalChangeID == fileChangeID(sourceInfo)
+					if !matches {
 						var err error
 						matches, err = fileMatchesManifestChunks(ctx, source, entry)
 						if err != nil && ctx.Err() != nil {
@@ -1659,10 +1692,25 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 	if err := os.Remove(stageCheckpointPath(cfg)); err != nil && !os.IsNotExist(err) {
 		log.Warn("Remove completed staging checkpoint: snapshot=%s error=%v", final.ID, err)
 	}
+	recordLocalChangeIDs(filepath.Clean(setting.AppWorkPath), final)
 	final.State = "ready"
-	if err := signIncrementalManifest(final, cfg.ControlToken); err != nil {
-		log.Error("Sign restored standby manifest failed: snapshot=%s error=%v", final.ID, err)
-		return err
+	manifestErr := signIncrementalManifest(final, cfg.ControlToken)
+	if manifestErr == nil {
+		manifestErr = writeManifestJSON(io.Discard, final, false)
+	}
+	if errors.Is(manifestErr, errManifestTooLarge) {
+		for i := range final.Files {
+			final.Files[i].LocalChangeID = ""
+		}
+		log.Warn("Omit local standby file identities because the ready manifest exceeds its size limit: snapshot=%s", final.ID)
+		manifestErr = signIncrementalManifest(final, cfg.ControlToken)
+		if manifestErr == nil {
+			manifestErr = writeManifestJSON(io.Discard, final, false)
+		}
+	}
+	if manifestErr != nil {
+		log.Error("Sign restored standby manifest failed: snapshot=%s error=%v", final.ID, manifestErr)
+		return manifestErr
 	}
 	if err := persistStandbyManifest(cfg.SnapshotDir, final); err != nil {
 		log.Error("Persist restored standby manifest failed: snapshot=%s error=%v", final.ID, err)
