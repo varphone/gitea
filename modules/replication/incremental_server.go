@@ -287,7 +287,7 @@ scanAttempts:
 		return
 	}
 	s.setTaskManifest(manifest)
-	log.Info("Preflight task %s completed: mode=%s base=%s files=%d bytes=%d scan_duration=%s total_duration=%s", id, scanMode, baseID, manifest.FileCount, manifest.Size, scanDuration, time.Since(taskStarted))
+	log.Info("Preflight task %s completed: mode=%s base=%s entries=%d bytes=%d scan_duration=%s total_duration=%s", id, scanMode, baseID, manifest.FileCount, manifest.Size, scanDuration, time.Since(taskStarted))
 	s.completeAsyncJob(id, manifest.Snapshot)
 	s.prune()
 }
@@ -374,7 +374,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 			return
 		}
 	}
-	log.Info("Finalize task %s starting from preflight %s: base_files=%d", id, baseID, base.FileCount)
+	log.Info("Finalize task %s starting from preflight %s: base_entries=%d", id, baseID, base.FileCount)
 
 	scanCtx, scanCancel := context.WithTimeout(context.Background(), s.cfg.SnapshotTimeout)
 	fenceStarted := time.Now()
@@ -426,7 +426,7 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 		s.failAsyncJob(id, err)
 		return
 	}
-	log.Info("Finalize task %s final scan completed: files=%d bytes=%d scan_duration=%s primary_outage=%s", id, manifest.FileCount, manifest.Size, time.Since(finalScanStarted), time.Since(outageStarted))
+	log.Info("Finalize task %s final scan completed: entries=%d bytes=%d scan_duration=%s primary_outage=%s", id, manifest.FileCount, manifest.Size, time.Since(finalScanStarted), time.Since(outageStarted))
 	manifest.ID = id
 	manifest.State = "transferring"
 	manifest.CreatedAt = time.Now().UTC()

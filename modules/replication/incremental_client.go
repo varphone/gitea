@@ -1427,7 +1427,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 			log.Warn("Cannot index existing standby data for chunk reuse: duration=%s error=%v", time.Since(indexStarted), err)
 		} else {
 			previous = local
-			log.Info("No trusted standby baseline; indexed local data for verified chunk reuse: files=%d bytes=%d duration=%s", local.FileCount, local.Size, time.Since(indexStarted))
+			log.Info("No trusted standby baseline; indexed local data for verified chunk reuse: entries=%d bytes=%d duration=%s", local.FileCount, local.Size, time.Since(indexStarted))
 		}
 	}
 	cacheDir := filepath.Join(cfg.SnapshotDir, ".chunks")
@@ -1478,7 +1478,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 			return err
 		}
 		pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention, cfg.ControlToken)
-		log.Info("Received preflight manifest %s with %d files and %s of content", preflight.ID, preflight.FileCount, strconv.FormatInt(preflight.Size, 10))
+		log.Info("Received preflight manifest %s with %d entries and %s of content", preflight.ID, preflight.FileCount, strconv.FormatInt(preflight.Size, 10))
 		if err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, preflight, previous, cacheDir, true); err != nil {
 			return err
 		}
@@ -1497,7 +1497,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 			return err
 		}
 		pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention, cfg.ControlToken)
-		log.Info("Received final sync manifest %s with %d files and %s of content", final.ID, final.FileCount, strconv.FormatInt(final.Size, 10))
+		log.Info("Received final sync manifest %s with %d entries and %s of content", final.ID, final.FileCount, strconv.FormatInt(final.Size, 10))
 		return completeFinalSync(ctx, cfg, base, client, final, previous, cacheDir, stage)
 	}
 	return errors.New("final sync manifest was rejected twice")
