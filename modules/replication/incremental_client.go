@@ -1774,6 +1774,7 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 		}
 		log.Warn("Standby activation completed with cleanup warning: snapshot=%s error=%v", final.ID, warning)
 	}
+	recordLocalChangeIDs(filepath.Clean(setting.AppWorkPath), final)
 	log.Info("Standby activation completed: snapshot=%s duration=%s; marking remote session complete", final.ID, time.Since(activationStarted))
 	remoteFinishStarted := time.Now()
 	if err := finishRemoteSession(ctx, client, base, cfg.ControlToken, final.ID, "complete"); err != nil {
@@ -1789,7 +1790,6 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 	if err := os.Remove(stageCheckpointPath(cfg)); err != nil && !os.IsNotExist(err) {
 		log.Warn("Remove completed staging checkpoint: snapshot=%s error=%v", final.ID, err)
 	}
-	recordLocalChangeIDs(filepath.Clean(setting.AppWorkPath), final)
 	final.State = "ready"
 	manifestErr := signIncrementalManifest(final, cfg.ControlToken)
 	if manifestErr == nil {
