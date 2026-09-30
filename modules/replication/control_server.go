@@ -73,7 +73,10 @@ func clearPrimaryOutageCheckpoint(snapshotDir string) error {
 	}
 	// Sync even when the checkpoint is already absent: a previous removal may
 	// have succeeded while its directory sync failed.
-	return syncDirectory(snapshotDir)
+	if err := syncDirectory(snapshotDir); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func validReplicationRequestID(id string) bool {
