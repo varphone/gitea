@@ -269,7 +269,7 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 			baseEntries[entry.Path] = entry
 		}
 	}
-	var entriesSeen, filesSeen, filesCompleted, filesReused, filesChunked, contentBytesSeen atomic.Int64
+	var entriesSeen, filesSeen, filesCompleted, filesReused, filesChunked, logicalFileBytesSeen, contentBytesChunked atomic.Int64
 	progressDone := make(chan struct{})
 	var progressWorkers sync.WaitGroup
 	progressWorkers.Go(func() {
@@ -280,7 +280,7 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 			case <-progressDone:
 				return
 			case <-ticker.C:
-				log.Info("Replication tree scan progress: entries_seen=%d files_seen=%d files_completed=%d reused_files=%d chunked_files=%d content_bytes_seen=%d verify_all=%t elapsed=%s", entriesSeen.Load(), filesSeen.Load(), filesCompleted.Load(), filesReused.Load(), filesChunked.Load(), contentBytesSeen.Load(), verifyAll, time.Since(scanStarted))
+				log.Info("Replication tree scan progress: entries_seen=%d files_seen=%d files_completed=%d reused_files=%d chunked_files=%d logical_file_bytes_seen=%d content_bytes_chunked=%d verify_all=%t elapsed=%s", entriesSeen.Load(), filesSeen.Load(), filesCompleted.Load(), filesReused.Load(), filesChunked.Load(), logicalFileBytesSeen.Load(), contentBytesChunked.Load(), verifyAll, time.Since(scanStarted))
 			}
 		}
 	})
@@ -325,7 +325,7 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 				return errors.New("manifest logical size overflow")
 			}
 			filesSeen.Add(1)
-			contentBytesSeen.Add(e.Size)
+			logicalFileBytesSeen.Add(e.Size)
 			e.ModTimeNS, e.ChangeID = info.ModTime().UnixNano(), fileChangeID(info)
 			old, hasOld := baseEntries[rel]
 			metadataUnchanged := hasOld && old.Type == "file" && old.Size == info.Size() &&
@@ -357,6 +357,7 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 			m.Size += e.Size
 			filesCompleted.Add(1)
 			filesChunked.Add(1)
+			contentBytesChunked.Add(e.Size)
 		default:
 			return fmt.Errorf("unsupported filesystem entry %q", rel)
 		}
