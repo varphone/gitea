@@ -1181,19 +1181,9 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 				_ = out.Close()
 				return stagingPathError("restore file timestamps", entry.Path, err)
 			}
-			if file, err := os.Open(tmp); err == nil {
-				if err := file.Close(); err != nil {
-					_ = out.Close()
-					return stagingPathError("close file", entry.Path, err)
-				}
-			} else if os.IsPermission(err) {
-				if err := out.Sync(); err != nil {
-					_ = out.Close()
-					return stagingPathError("sync file", entry.Path, err)
-				}
-			} else {
+			if err := out.Sync(); err != nil {
 				_ = out.Close()
-				return stagingPathError("open file for sync", entry.Path, err)
+				return stagingPathError("sync file", entry.Path, err)
 			}
 			if err := out.Close(); err != nil {
 				return stagingPathError("close file", entry.Path, err)
