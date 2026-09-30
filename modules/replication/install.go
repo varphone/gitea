@@ -124,32 +124,59 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 			log.Error("Rollback cannot stop standby service: snapshot=%s error=%v", snapshot.ID, err)
 			return errors.Join(cause, fmt.Errorf("cannot safely stop failed restored service: %w", err))
 		}
-		if activated {
+		rollbackAttempted := activated
+		if rollbackAttempted {
 			rollbackStarted := time.Now()
 			if err := atomicSwitchWithTimeout(cfg.ServiceTimeout, cfg); err != nil {
 				log.Error("Rollback data exchange failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(rollbackStarted), err)
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("atomically restore previous data: %w", err))
 			} else {
-				log.Info("Restored previous standby data after failed activation: snapshot=%s duration=%s", snapshot.ID, time.Since(rollbackStarted))
-				activated = false
+				log.Info("Rollback data exchange completed: snapshot=%s duration=%s", snapshot.ID, time.Since(rollbackStarted))
+			}
+		}
+		rootAfter, rootErr := os.Lstat(root)
+		previousRootActive := rootErr == nil && rootAfter.IsDir() && rootAfter.Mode()&os.ModeSymlink == 0 && os.SameFile(rootAfter, rootInfo)
+		if rootErr != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("inspect standby data root after rollback: %w", rootErr))
+		}
+		if !previousRootActive {
+			stateErr := errors.New("cannot verify that previous standby data is active after rollback")
+			log.Error("Rollback could not verify previous standby data; leaving service stopped: snapshot=%s error=%v", snapshot.ID, stateErr)
+			rollbackErrors = append(rollbackErrors, stateErr)
+		} else if rollbackAttempted {
+			log.Info("Verified previous standby data after failed activation: snapshot=%s", snapshot.ID)
+			activated = false
+			stageAfter, stageErr := os.Lstat(stage)
+			if stageErr == nil && stageAfter.IsDir() && stageAfter.Mode()&os.ModeSymlink == 0 && os.SameFile(stageAfter, stageInfo) {
 				failed := filepath.Join(cfg.SnapshotDir, ".failed-"+snapshot.ID)
 				if _, err := os.Lstat(failed); err == nil {
 					failed += "-" + time.Now().UTC().Format("20060102T150405.000000000Z")
 				}
 				if err := os.Rename(stage, failed); err != nil {
+					log.Error("Preserve failed standby restore failed: snapshot=%s error=%v", snapshot.ID, err)
 					rollbackErrors = append(rollbackErrors, fmt.Errorf("preserve failed restore: %w", err))
 				} else {
 					stageOwned = false
 				}
+			} else {
+				if stageErr == nil {
+					stageErr = errors.New("install stage no longer contains the failed snapshot")
+				}
+				log.Warn("Cannot preserve failed standby restore stage: snapshot=%s error=%v", snapshot.ID, stageErr)
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("preserve failed restore: %w", stageErr))
 			}
 		}
 		if wasActive {
-			restartStarted := time.Now()
-			if err := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); err != nil {
-				log.Error("Rollback could not restart previous standby service: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(restartStarted), err)
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("restart previous gitea: %w", err))
+			if !previousRootActive {
+				log.Error("Previous standby service remains stopped because its data root is unverified: snapshot=%s", snapshot.ID)
 			} else {
-				log.Info("Restarted previous standby service after rollback: snapshot=%s duration=%s", snapshot.ID, time.Since(restartStarted))
+				restartStarted := time.Now()
+				if err := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); err != nil {
+					log.Error("Rollback could not restart previous standby service: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(restartStarted), err)
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("restart previous gitea: %w", err))
+				} else {
+					log.Info("Restarted previous standby service after rollback: snapshot=%s duration=%s", snapshot.ID, time.Since(restartStarted))
+				}
 			}
 		}
 		return errors.Join(append([]error{cause}, rollbackErrors...)...)
@@ -160,40 +187,30 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 		log.Error("Atomic standby data exchange failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(switchStarted), err)
 		rootAfter, rootErr := os.Lstat(root)
 		stageAfter, stageErr := os.Lstat(stage)
-		if rootErr == nil && stageErr == nil {
-			switched := os.SameFile(rootAfter, stageInfo) && os.SameFile(stageAfter, rootInfo)
-			unchanged := os.SameFile(rootAfter, rootInfo) && os.SameFile(stageAfter, stageInfo)
-			if switched {
-				stageOwned = false
-				activated = true
-				return rollback(fmt.Errorf("atomic data exchange completed but its service reported an error: %w", err))
-			}
-			if !unchanged {
-				stageOwned = false
-				stateErr := errors.New("cannot determine whether atomic data exchange completed; preserving install stage")
-				if wasActive {
-					if startErr := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); startErr != nil {
-						stateErr = errors.Join(stateErr, fmt.Errorf("restart gitea after uncertain data exchange: %w", startErr))
-					}
-				}
-				return errors.Join(fmt.Errorf("atomically activate restored data: %w", err), stateErr)
-			}
-		} else {
+		rootIsOriginal := rootErr == nil && rootAfter.IsDir() && rootAfter.Mode()&os.ModeSymlink == 0 && os.SameFile(rootAfter, rootInfo)
+		rootIsStage := rootErr == nil && rootAfter.IsDir() && rootAfter.Mode()&os.ModeSymlink == 0 && os.SameFile(rootAfter, stageInfo)
+		stageIsOriginalRoot := stageErr == nil && stageAfter.IsDir() && stageAfter.Mode()&os.ModeSymlink == 0 && os.SameFile(stageAfter, rootInfo)
+		stageIsOriginalStage := stageErr == nil && stageAfter.IsDir() && stageAfter.Mode()&os.ModeSymlink == 0 && os.SameFile(stageAfter, stageInfo)
+		if rootIsStage && stageIsOriginalRoot {
 			stageOwned = false
-			stateErr := errors.Join(rootErr, stageErr, errors.New("cannot determine whether atomic data exchange completed; preserving install stage"))
+			activated = true
+			return rollback(fmt.Errorf("atomic data exchange completed but its service reported an error: %w", err))
+		}
+		if rootIsOriginal {
+			if !stageIsOriginalStage {
+				stageOwned = false
+			}
 			if wasActive {
 				if startErr := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); startErr != nil {
-					stateErr = errors.Join(stateErr, fmt.Errorf("restart gitea after uncertain data exchange: %w", startErr))
+					return errors.Join(fmt.Errorf("atomically activate restored data: %w", err), fmt.Errorf("restart unchanged gitea: %w", startErr))
 				}
 			}
-			return errors.Join(fmt.Errorf("atomically activate restored data: %w", err), stateErr)
+			return fmt.Errorf("atomically activate restored data: %w", err)
 		}
-		if wasActive {
-			if startErr := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); startErr != nil {
-				return errors.Join(fmt.Errorf("atomically activate restored data: %w", err), fmt.Errorf("restart unchanged gitea: %w", startErr))
-			}
-		}
-		return fmt.Errorf("atomically activate restored data: %w", err)
+		stageOwned = false
+		stateErr := errors.Join(rootErr, stageErr, errors.New("cannot verify active data root after atomic exchange; preserving install stage and leaving service stopped"))
+		log.Error("Cannot verify standby data after failed atomic exchange; leaving service stopped: snapshot=%s error=%v", snapshot.ID, stateErr)
+		return errors.Join(fmt.Errorf("atomically activate restored data: %w", err), stateErr)
 	}
 	stageOwned = false
 	activated = true
