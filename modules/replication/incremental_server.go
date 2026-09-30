@@ -66,6 +66,16 @@ func preflightIsFresh(manifest *SnapshotManifest, now time.Time) bool {
 	return age >= -reusablePreflightMaxAge && age <= reusablePreflightMaxAge
 }
 
+func newerManifest(candidate, current *SnapshotManifest) bool {
+	if current == nil {
+		return true
+	}
+	if candidate.CreatedAt.Equal(current.CreatedAt) {
+		return candidate.ID > current.ID
+	}
+	return candidate.CreatedAt.After(current.CreatedAt)
+}
+
 func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
 	paths := []string{baselineManifestPath(s.cfg.SnapshotDir)}
 	history, err := listManifestPaths(s.cfg.SnapshotDir)
@@ -75,7 +85,7 @@ func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
 	sort.Sort(sort.Reverse(sort.StringSlice(history)))
 	paths = append(paths, history...)
 	seen := map[string]struct{}{}
-	var fallback *SnapshotManifest
+	var latestReady, fallback *SnapshotManifest
 	for _, path := range paths {
 		if _, ok := seen[path]; ok {
 			continue
@@ -83,26 +93,29 @@ func (s *controlServer) preflightPlan(now time.Time) (*SnapshotManifest, bool) {
 		seen[path] = struct{}{}
 		manifest, err := loadTrustedManifest(path, s.cfg.ControlToken, "ready")
 		if err == nil {
-			if manifest.FullScanAt.IsZero() ||
-				(s.cfg.FullScanInterval > 0 && !now.Before(manifest.FullScanAt.Add(s.cfg.FullScanInterval))) {
-				log.Info("Run full disaster-recovery verification from baseline %s: last_full_scan=%s interval=%s", manifest.ID, manifest.FullScanAt, s.cfg.FullScanInterval)
-				return manifest, true
+			if newerManifest(manifest, latestReady) {
+				latestReady = manifest
 			}
-			log.Info("Run incremental disaster-recovery preflight from ready baseline %s: last_full_scan=%s", manifest.ID, manifest.FullScanAt)
-			return manifest, false
-		}
-		if fallback != nil {
 			continue
 		}
 		manifest, err = loadTrustedManifestStates(path, s.cfg.ControlToken, "preflight", "transferring")
 		if err != nil {
 			continue
 		}
-		fallback = manifest
+		if newerManifest(manifest, fallback) {
+			fallback = manifest
+		}
+	}
+	if latestReady != nil {
+		if s.fullScanDue(latestReady, now) {
+			log.Info("Run full disaster-recovery verification from baseline %s: last_full_scan=%s interval=%s", latestReady.ID, latestReady.FullScanAt, s.cfg.FullScanInterval)
+			return latestReady, true
+		}
+		log.Info("Run incremental disaster-recovery preflight from ready baseline %s: last_full_scan=%s", latestReady.ID, latestReady.FullScanAt)
+		return latestReady, false
 	}
 	if fallback != nil {
-		if fallback.FullScanAt.IsZero() ||
-			(s.cfg.FullScanInterval > 0 && !now.Before(fallback.FullScanAt.Add(s.cfg.FullScanInterval))) {
+		if s.fullScanDue(fallback, now) {
 			log.Info("Run full disaster-recovery verification from fallback %s in state %s: last_full_scan=%s interval=%s", fallback.ID, fallback.State, fallback.FullScanAt, s.cfg.FullScanInterval)
 			return fallback, true
 		}
