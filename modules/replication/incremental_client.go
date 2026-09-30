@@ -1302,8 +1302,28 @@ func resumablePreflightManifest(snapshotDir, token string) *SnapshotManifest {
 	now := time.Now().UTC()
 	var latest *SnapshotManifest
 	for _, path := range paths {
-		manifest, err := loadTrustedManifest(path, token, "preflight")
-		if err != nil || !preflightIsFresh(manifest, now) || (latest != nil && !manifest.CreatedAt.After(latest.CreatedAt)) {
+		if id := strings.TrimSuffix(filepath.Base(path), ".json"); !validSnapshotID(id) {
+			continue
+		}
+		manifest, err := loadManifestFile(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Warn("Ignore invalid standby preflight recovery manifest %s: %v", path, err)
+			}
+			continue
+		}
+		if manifest.State != "preflight" {
+			continue
+		}
+		if err := validateManifestIdentity(manifest, token); err != nil {
+			log.Warn("Ignore untrusted standby preflight recovery manifest %s: %v", path, err)
+			continue
+		}
+		if !preflightIsFresh(manifest, now) {
+			log.Debug("Ignore stale standby preflight recovery manifest %s: created_at=%s", path, manifest.CreatedAt)
+			continue
+		}
+		if latest != nil && !manifest.CreatedAt.After(latest.CreatedAt) {
 			continue
 		}
 		latest = manifest
@@ -1319,8 +1339,24 @@ func resumableFinalManifest(snapshotDir, token string) *SnapshotManifest {
 	}
 	var latest *SnapshotManifest
 	for _, path := range paths {
-		manifest, err := loadTrustedManifest(path, token, "transferring")
-		if err != nil || (latest != nil && !manifest.CreatedAt.After(latest.CreatedAt)) {
+		if id := strings.TrimSuffix(filepath.Base(path), ".json"); !validSnapshotID(id) {
+			continue
+		}
+		manifest, err := loadManifestFile(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Warn("Ignore invalid standby final recovery manifest %s: %v", path, err)
+			}
+			continue
+		}
+		if manifest.State != "transferring" {
+			continue
+		}
+		if err := validateManifestIdentity(manifest, token); err != nil {
+			log.Warn("Ignore untrusted standby final recovery manifest %s: %v", path, err)
+			continue
+		}
+		if latest != nil && !manifest.CreatedAt.After(latest.CreatedAt) {
 			continue
 		}
 		latest = manifest
