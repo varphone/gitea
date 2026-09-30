@@ -15,6 +15,7 @@ ExecStart=/usr/local/bin/gitea replicate serve --config /etc/gitea/app.ini
 ExecStopPost=/usr/local/bin/gitea replicate ensure-primary --config /etc/gitea/app.ini
 Restart=on-failure
 RestartSec=5s
+TimeoutStopSec=3min
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

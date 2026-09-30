@@ -156,6 +156,10 @@ systemctl enable --now gitea-replication.service
 systemctl enable --now gitea-replication-restore.timer
 ```
 
+The control unit's `TimeoutStopSec` must exceed `[replicate] SERVICE_TIMEOUT`;
+its `ExecStopPost` waits for the primary readiness check before clearing an
+outage checkpoint.
+
 The restore worker uses a non-blocking `Type=simple` unit: starting it does not
 wait for a potentially long synchronization to finish. The timer schedules the
 next run one hour after the worker exits, so a slow or retrying transfer never
