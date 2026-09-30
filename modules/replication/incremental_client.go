@@ -30,18 +30,19 @@ import (
 )
 
 const (
-	requestRetryLimit      = 5
-	requestRetryBaseDelay  = 500 * time.Millisecond
-	requestRetryMaxDelay   = 5 * time.Second
-	chunkProgressLogStride = 128
-	chunkChangeWarnBurst   = 8
-	manifestPollInterval   = time.Second
-	chunkChangeStopStride  = 256
-	finalChunkFetchWorkers = 8
-	preflightChunkWorkers  = 4
-	statusBodyPreviewLimit = 4 << 10
-	maxRetryResponseDrain  = 64 << 10
-	maxRetryDrainDuration  = 250 * time.Millisecond
+	requestRetryLimit       = 5
+	requestRetryBaseDelay   = 500 * time.Millisecond
+	requestRetryMaxDelay    = 5 * time.Second
+	chunkProgressLogStride  = 128
+	chunkChangeWarnBurst    = 8
+	manifestPollInterval    = time.Second
+	chunkChangeStopStride   = 256
+	finalChunkFetchWorkers  = 8
+	preflightChunkWorkers   = 4
+	statusBodyPreviewLimit  = 4 << 10
+	maxRetryResponseDrain   = 64 << 10
+	maxRetryDrainDuration   = 250 * time.Millisecond
+	responseBodyIdleTimeout = 2 * time.Minute
 )
 
 var syncBusyRetryDelay = time.Second
@@ -96,21 +97,50 @@ func shouldRetryHTTPStatus(status int) bool {
 
 type cancelRequestBody struct {
 	io.ReadCloser
-	cancel context.CancelFunc
+	cancel       context.CancelFunc
+	parent       context.Context
+	idleTimer    *time.Timer
+	idleTimedOut atomic.Bool
+	timerMu      sync.Mutex
+	closed       bool
+}
+
+func (b *cancelRequestBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.timerMu.Lock()
+		if !b.closed {
+			b.idleTimer.Reset(responseBodyIdleTimeout)
+		}
+		b.timerMu.Unlock()
+	}
+	if err != nil && b.idleTimedOut.Load() && b.parent.Err() == nil {
+		return n, fmt.Errorf("replication response body idle timeout after %s: %v", responseBodyIdleTimeout, err)
+	}
+	return n, err
 }
 
 func (b *cancelRequestBody) Close() error {
+	b.timerMu.Lock()
+	b.closed = true
+	b.timerMu.Unlock()
 	err := b.ReadCloser.Close()
+	b.idleTimer.Stop()
 	b.cancel()
 	return err
 }
 
-func keepRequestContextUntilBodyClose(resp *http.Response, cancel context.CancelFunc) {
+func keepRequestContextUntilBodyClose(parent context.Context, resp *http.Response, cancel context.CancelFunc) {
 	if resp == nil || resp.Body == nil {
 		cancel()
 		return
 	}
-	resp.Body = &cancelRequestBody{ReadCloser: resp.Body, cancel: cancel}
+	body := &cancelRequestBody{ReadCloser: resp.Body, cancel: cancel, parent: parent}
+	body.idleTimer = time.AfterFunc(responseBodyIdleTimeout, func() {
+		body.idleTimedOut.Store(true)
+		cancel()
+	})
+	resp.Body = body
 }
 
 func closeRetryResponse(resp *http.Response, cancel context.CancelFunc) {
@@ -188,7 +218,7 @@ func doRetryableJSONRequest(ctx context.Context, client *http.Client, method, ur
 				lastErr = retryErr
 				continue
 			}
-			keepRequestContextUntilBodyClose(resp, cancel)
+			keepRequestContextUntilBodyClose(ctx, resp, cancel)
 			return resp, nil
 		}
 		if resp != nil && resp.Body != nil {
@@ -240,7 +270,7 @@ func doRetryableRequest(ctx context.Context, client *http.Client, method, url, t
 			lastErr = retryErr
 			continue
 		}
-		keepRequestContextUntilBodyClose(resp, cancel)
+		keepRequestContextUntilBodyClose(ctx, resp, cancel)
 		return resp, nil
 	}
 	if lastErr == nil {
@@ -401,22 +431,35 @@ func requestManifest(ctx context.Context, client *http.Client, base, token, endp
 }
 
 func requestSnapshotStatus(ctx context.Context, client *http.Client, base, token, id string) (*Snapshot, error) {
-	resp, err := doRetryableRequest(ctx, client, http.MethodGet, base+"/api/v1/replication/sync-jobs/"+id, token, "poll snapshot "+id)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusNotFound {
-			return nil, fmt.Errorf("%w: %s", errRemoteSnapshotUnavailable, id)
+	operation := "poll snapshot " + id
+	for attempt := 1; attempt <= requestRetryLimit; attempt++ {
+		resp, err := doRetryableRequest(ctx, client, http.MethodGet, base+"/api/v1/replication/sync-jobs/"+id, token, operation)
+		if err != nil {
+			return nil, err
 		}
-		return nil, responseStatusError("snapshot "+id, resp)
+		if resp.StatusCode != http.StatusOK {
+			if resp.StatusCode == http.StatusNotFound {
+				_ = resp.Body.Close()
+				return nil, fmt.Errorf("%w: %s", errRemoteSnapshotUnavailable, id)
+			}
+			err := responseStatusError("snapshot "+id, resp)
+			_ = resp.Body.Close()
+			return nil, err
+		}
+		var snapshot Snapshot
+		err = decodeBoundedJSON(resp.Body, 1<<20, &snapshot)
+		_ = resp.Body.Close()
+		if err == nil {
+			return &snapshot, nil
+		}
+		if attempt == requestRetryLimit || !shouldRetryRequestError(err) {
+			return nil, err
+		}
+		if retryErr := waitForRetry(ctx, attempt, operation, err); retryErr != nil {
+			return nil, retryErr
+		}
 	}
-	var snapshot Snapshot
-	if err := decodeBoundedJSON(resp.Body, 1<<20, &snapshot); err != nil {
-		return nil, err
-	}
-	return &snapshot, nil
+	return nil, errors.New("snapshot status retries exhausted")
 }
 
 func requestManifestByID(ctx context.Context, client *http.Client, base, token, id, expectedState string) (*SnapshotManifest, error) {
