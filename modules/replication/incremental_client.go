@@ -623,6 +623,11 @@ func previousManifest(path, token string) *SnapshotManifest {
 	}
 	if manifest := latestTrustedReadyManifest(filepath.Dir(path), token); manifest != nil {
 		log.Warn("Using retained standby baseline %s because current checkpoint %s is unavailable", manifest.ID, path)
+		if err := writeManifestAt(path, manifest); err != nil {
+			log.Warn("Could not restore standby current checkpoint %s from retained baseline %s: %v", path, manifest.ID, err)
+		} else {
+			log.Info("Restored standby current checkpoint %s from retained baseline %s", path, manifest.ID)
+		}
 		return manifest
 	}
 	return nil
