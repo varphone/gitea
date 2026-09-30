@@ -950,6 +950,14 @@ func prepareChunkCache(cacheDir string) error {
 }
 
 func storeChunk(cacheDir, hash string, data []byte) error {
+	return storeChunkWithDirectorySync(cacheDir, hash, data, true)
+}
+
+func storeChunkForBatch(cacheDir, hash string, data []byte) error {
+	return storeChunkWithDirectorySync(cacheDir, hash, data, false)
+}
+
+func storeChunkWithDirectorySync(cacheDir, hash string, data []byte, syncDirectories bool) error {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != hash {
 		return errors.New("received chunk hash mismatch")
@@ -987,7 +995,10 @@ func storeChunk(cacheDir, hash string, data []byte) error {
 		_ = file.Close()
 		return err
 	}
-	_, writeErr := file.Write(data)
+	n, writeErr := file.Write(data)
+	if writeErr == nil && n != len(data) {
+		writeErr = io.ErrShortWrite
+	}
 	syncErr := file.Sync()
 	closeErr := file.Close()
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
@@ -996,7 +1007,51 @@ func storeChunk(cacheDir, hash string, data []byte) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	return syncDirectory(dir)
+	if syncDirectories {
+		return errors.Join(syncDirectory(cacheDir), syncDirectory(dir))
+	}
+	return nil
+}
+
+func syncChunkCacheDirectories(cacheDir string, shardSet *sync.Map) error {
+	var shards []string
+	var syncErrors []error
+	shardSet.Range(func(key, _ any) bool {
+		shard, ok := key.(string)
+		if !ok {
+			syncErrors = append(syncErrors, fmt.Errorf("invalid chunk cache shard key %T", key))
+			return true
+		}
+		shards = append(shards, shard)
+		return true
+	})
+	slices.Sort(shards)
+	if len(shards) == 0 {
+		return errors.Join(syncErrors...)
+	}
+	if err := syncDirectory(cacheDir); err != nil {
+		syncErrors = append(syncErrors, fmt.Errorf("sync chunk cache directory: %w", err))
+	}
+	for _, name := range shards {
+		if len(name) != 2 || !isLowerHex(name) {
+			syncErrors = append(syncErrors, fmt.Errorf("invalid chunk cache shard %q", name))
+			continue
+		}
+		shardPath := filepath.Join(cacheDir, name)
+		info, err := os.Lstat(shardPath)
+		if err != nil {
+			syncErrors = append(syncErrors, fmt.Errorf("inspect chunk cache shard %q: %w", name, err))
+			continue
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			syncErrors = append(syncErrors, fmt.Errorf("chunk cache shard %q is not a real directory", name))
+			continue
+		}
+		if err := syncDirectory(shardPath); err != nil {
+			syncErrors = append(syncErrors, fmt.Errorf("sync chunk cache shard %q: %w", name, err))
+		}
+	}
+	return errors.Join(syncErrors...)
 }
 
 func openManifestFile(path string) (*os.File, error) {

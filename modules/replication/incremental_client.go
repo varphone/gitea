@@ -672,6 +672,7 @@ func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, tok
 	var workers sync.WaitGroup
 	var firstErr error
 	var firstErrOnce sync.Once
+	var cacheShards sync.Map
 	var fetched atomic.Int64
 	var fetchedBytes atomic.Int64
 	var lastProgress atomic.Int64
@@ -682,7 +683,7 @@ func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, tok
 			for hash := range jobs {
 				data, err := requestChunk(workerCtx, client, base, token, id, hash)
 				if err == nil {
-					err = storeChunk(cacheDir, hash, data)
+					err = storeChunkForBatch(cacheDir, hash, data)
 				}
 				if err != nil {
 					firstErrOnce.Do(func() {
@@ -691,6 +692,7 @@ func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, tok
 					})
 					return
 				}
+				cacheShards.LoadOrStore(hash[:2], struct{}{})
 				count := fetched.Add(1)
 				bytes := fetchedBytes.Add(int64(len(data)))
 				now := time.Now()
@@ -718,6 +720,10 @@ sendJobs:
 	}
 	close(jobs)
 	workers.Wait()
+	if err := syncChunkCacheDirectories(cacheDir, &cacheShards); err != nil {
+		log.Error("Persist final chunk cache failed: snapshot=%s error=%v", id, err)
+		firstErr = errors.Join(firstErr, err)
+	}
 	elapsed := time.Since(started)
 	bytes := fetchedBytes.Load()
 	if firstErr != nil {
@@ -753,6 +759,7 @@ func fetchPreflightChunksConcurrently(ctx context.Context, client *http.Client, 
 	var fetched atomic.Int64
 	var fetchedBytes atomic.Int64
 	var deferred atomic.Int64
+	var cacheShards sync.Map
 	var lastProgress atomic.Int64
 	var stopAfterChurn atomic.Bool
 	workers.Add(workerCount)
@@ -789,13 +796,14 @@ func fetchPreflightChunksConcurrently(ctx context.Context, client *http.Client, 
 					})
 					return
 				}
-				if err := storeChunk(cacheDir, hash, data); err != nil {
+				if err := storeChunkForBatch(cacheDir, hash, data); err != nil {
 					firstErrOnce.Do(func() {
 						firstErr, firstHash = err, hash
 						cancel()
 					})
 					return
 				}
+				cacheShards.LoadOrStore(hash[:2], struct{}{})
 				count := fetched.Add(1)
 				bytes := fetchedBytes.Add(int64(len(data)))
 				now := time.Now()
@@ -826,6 +834,10 @@ sendJobs:
 	}
 	close(jobs)
 	workers.Wait()
+	if err := syncChunkCacheDirectories(cacheDir, &cacheShards); err != nil {
+		log.Error("Persist preflight chunk cache failed: snapshot=%s error=%v", id, err)
+		firstErr = errors.Join(firstErr, err)
+	}
 	elapsed := preparationDuration + time.Since(started)
 	fetchedCount, bytes, deferredCount := fetched.Load(), fetchedBytes.Load(), deferred.Load()
 	if firstErr != nil {
