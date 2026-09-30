@@ -105,7 +105,15 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	stopStarted := time.Now()
 	if err := systemctl(taskCtx, "stop", cfg.GiteaServiceName); err != nil {
 		log.Error("Stop standby service failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(stopStarted), err)
-		return fmt.Errorf("stop standby gitea: %w", err)
+		stopErr := fmt.Errorf("stop standby gitea: %w", err)
+		if wasActive {
+			if restartErr := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); restartErr != nil {
+				log.Error("Restart standby service after stop failure failed: snapshot=%s error=%v", snapshot.ID, restartErr)
+				return errors.Join(stopErr, fmt.Errorf("restart standby after stop failure: %w", restartErr))
+			}
+			log.Info("Ensured standby service is started after stop failure: snapshot=%s", snapshot.ID)
+		}
+		return stopErr
 	}
 	log.Info("Stopped standby service for snapshot installation: snapshot=%s duration=%s", snapshot.ID, time.Since(stopStarted))
 	activated := false
