@@ -248,9 +248,11 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	// Cleanup failure must not turn a successful activation into a retry loop; a
 	// later maintenance job may remove the backup.
 	cleanupStarted := time.Now()
+	makeRemovableErr := makeTreeRemovable(context.Background(), stage)
 	if err := cleanupBackup(stage); err != nil {
-		log.Warn("Remove previous standby data backup failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(cleanupStarted), err)
-		return &cleanupWarning{err: err}
+		cleanupErr := errors.Join(makeRemovableErr, err)
+		log.Warn("Remove previous standby data backup failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(cleanupStarted), cleanupErr)
+		return &cleanupWarning{err: cleanupErr}
 	}
 	if err := syncDirectory(cfg.SnapshotDir); err != nil {
 		return &cleanupWarning{err: err}
