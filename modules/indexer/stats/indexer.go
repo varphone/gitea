@@ -10,6 +10,7 @@ import (
 	repo_model "gitea.dev/models/repo"
 	"gitea.dev/modules/graceful"
 	"gitea.dev/modules/log"
+	"gitea.dev/modules/replication"
 )
 
 // Indexer defines an interface to index repository stats
@@ -24,13 +25,18 @@ var indexer Indexer
 
 // Init initialize the repo indexer
 func Init() error {
+	runWorkers := !replication.IsReplicaReadOnly()
 	indexer = &DBIndexer{}
 
-	if err := initStatsQueue(); err != nil {
+	if err := initStatsQueue(runWorkers); err != nil {
 		return err
 	}
 
-	go populateRepoIndexer(graceful.GetManager().ShutdownContext())
+	if runWorkers {
+		go populateRepoIndexer(graceful.GetManager().ShutdownContext())
+	} else {
+		log.Info("Replication replica mode is active; repository stats index updates are paused")
+	}
 
 	return nil
 }

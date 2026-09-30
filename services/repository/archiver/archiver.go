@@ -22,6 +22,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/process"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/storage"
 	"gitea.dev/modules/util"
@@ -284,7 +285,9 @@ func Init(ctx context.Context) error {
 	if archiverQueue == nil {
 		return errors.New("unable to create repo-archive queue")
 	}
-	go graceful.GetManager().RunWithCancel(archiverQueue)
+	if !replication.IsReplicaReadOnly() {
+		go graceful.GetManager().RunWithCancel(archiverQueue)
+	}
 
 	return nil
 }
@@ -364,21 +367,34 @@ func ServeRepoArchive(ctx *gitea_context.Base, archiveReq *ArchiveRequest) error
 	downloadName := archiveReq.Repo.Name + "-" + archiveReq.GetArchiveName()
 
 	if setting.Repository.StreamArchives || len(archiveReq.Paths) > 0 {
-		// the header must be set before starting streaming even an error would occur,
-		// because errors may happen in git command and such cases aren't in our control.
-		httplib.ServeSetHeaders(ctx.Resp, httplib.ServeHeaderOptions{Filename: downloadName})
-		if err := archiveReq.Stream(ctx, ctx.Resp); err != nil && !ctx.Written() {
-			if gitcmd.IsStderr(err, gitcmd.StderrPathSpec) || gitcmd.IsStderr(err, gitcmd.StderrNotTreeObject) {
-				return util.NewInvalidArgumentErrorf("path doesn't exist or is invalid")
-			}
-			return fmt.Errorf("archive repo %s: failed to stream: %w", archiveReq.Repo.FullName(), err)
-		}
-		return nil
+		return streamRepoArchive(ctx, archiveReq, downloadName)
 	}
 
-	archiver, err := archiveReq.Await(ctx)
-	if err != nil {
-		return fmt.Errorf("archive repo %s: failed to await: %w", archiveReq.Repo.FullName(), err)
+	var archiver *repo_model.RepoArchiver
+	var err error
+	if replication.IsReplicaReadOnly() {
+		archiver, err = repo_model.GetRepoArchiver(ctx, archiveReq.Repo.ID, archiveReq.Type, archiveReq.CommitID)
+		if err != nil {
+			return fmt.Errorf("archive repo %s: failed to get cached archive: %w", archiveReq.Repo.FullName(), err)
+		}
+		if archiver != nil && archiver.Status == repo_model.ArchiverReady {
+			if _, err := storage.RepoArchives.Stat(archiver.RelativePath()); err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("archive repo %s: failed to inspect cached archive: %w", archiveReq.Repo.FullName(), err)
+				}
+				archiver = nil
+			}
+		} else {
+			archiver = nil
+		}
+		if archiver == nil {
+			return streamRepoArchive(ctx, archiveReq, downloadName)
+		}
+	} else {
+		archiver, err = archiveReq.Await(ctx)
+		if err != nil {
+			return fmt.Errorf("archive repo %s: failed to await: %w", archiveReq.Repo.FullName(), err)
+		}
 	}
 
 	rPath := archiver.RelativePath()
@@ -401,5 +417,18 @@ func ServeRepoArchive(ctx *gitea_context.Base, archiveReq *ArchiveRequest) error
 		Filename:     downloadName,
 		LastModified: archiver.CreatedUnix.AsLocalTime(),
 	})
+	return nil
+}
+
+func streamRepoArchive(ctx *gitea_context.Base, archiveReq *ArchiveRequest, downloadName string) error {
+	// the header must be set before starting streaming even an error would occur,
+	// because errors may happen in git command and such cases aren't in our control.
+	httplib.ServeSetHeaders(ctx.Resp, httplib.ServeHeaderOptions{Filename: downloadName})
+	if err := archiveReq.Stream(ctx, ctx.Resp); err != nil && !ctx.Written() {
+		if gitcmd.IsStderr(err, gitcmd.StderrPathSpec) || gitcmd.IsStderr(err, gitcmd.StderrNotTreeObject) {
+			return util.NewInvalidArgumentErrorf("path doesn't exist or is invalid")
+		}
+		return fmt.Errorf("archive repo %s: failed to stream: %w", archiveReq.Repo.FullName(), err)
+	}
 	return nil
 }

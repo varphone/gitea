@@ -21,6 +21,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/process"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/util"
 )
@@ -93,6 +94,7 @@ func index(ctx context.Context, indexer internal.Indexer, repoID int64) error {
 
 // Init initialize the repo indexer
 func Init() {
+	readOnlyReplica := replication.IsReplicaReadOnly()
 	if !setting.Indexer.RepoIndexerEnabled {
 		(*globalIndexer.Load()).Close()
 		return
@@ -191,11 +193,15 @@ func Init() {
 
 		globalIndexer.Store(&rIndexer)
 
-		// Start processing the queue
-		go graceful.GetManager().RunWithCancel(indexerQueue)
+		if readOnlyReplica {
+			log.Info("Replication replica mode is active; code index updates are paused")
+		} else {
+			// Start processing the queue
+			go graceful.GetManager().RunWithCancel(indexerQueue)
 
-		if !existed { // populate the index because it's created for the first time
-			go graceful.GetManager().RunWithShutdownContext(populateRepoIndexer)
+			if !existed { // populate the index because it's created for the first time
+				go graceful.GetManager().RunWithShutdownContext(populateRepoIndexer)
+			}
 		}
 		select {
 		case waitChannel <- time.Since(start):

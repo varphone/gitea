@@ -28,12 +28,14 @@ func handler(items ...int64) []int64 {
 	return nil
 }
 
-func initStatsQueue() error {
+func initStatsQueue(runWorker bool) error {
 	statsQueue = queue.CreateUniqueQueue(graceful.GetManager().ShutdownContext(), "repo_stats_update", handler)
 	if statsQueue == nil {
 		return errors.New("unable to create repo_stats_update queue")
 	}
-	go graceful.GetManager().RunWithCancel(statsQueue)
+	if runWorker {
+		go graceful.GetManager().RunWithCancel(statsQueue)
+	}
 	return nil
 }
 
