@@ -41,6 +41,7 @@ const (
 	preflightChunkWorkers  = 4
 	statusBodyPreviewLimit = 4 << 10
 	maxRetryResponseDrain  = 64 << 10
+	maxRetryDrainDuration  = 250 * time.Millisecond
 )
 
 var syncBusyRetryDelay = time.Second
@@ -93,12 +94,38 @@ func shouldRetryHTTPStatus(status int) bool {
 	return status == http.StatusInternalServerError || status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
 
-func closeRetryResponse(resp *http.Response) {
+type cancelRequestBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelRequestBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
+func keepRequestContextUntilBodyClose(resp *http.Response, cancel context.CancelFunc) {
 	if resp == nil || resp.Body == nil {
+		cancel()
 		return
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxRetryResponseDrain))
+	resp.Body = &cancelRequestBody{ReadCloser: resp.Body, cancel: cancel}
+}
+
+func closeRetryResponse(resp *http.Response, cancel context.CancelFunc) {
+	if resp == nil || resp.Body == nil {
+		cancel()
+		return
+	}
+	timer := time.AfterFunc(maxRetryDrainDuration, cancel)
+	n, drainErr := io.Copy(io.Discard, io.LimitReader(resp.Body, maxRetryResponseDrain+1))
+	drainTimedOut := !timer.Stop()
+	if drainTimedOut || drainErr != nil || n > maxRetryResponseDrain {
+		cancel()
+	}
 	_ = resp.Body.Close()
+	cancel()
 }
 
 func shouldRetryRequestError(err error) bool {
@@ -142,8 +169,10 @@ func waitForRetryDelay(ctx context.Context, attempt int, operation string, reaso
 func doRetryableJSONRequest(ctx context.Context, client *http.Client, method, url, token, operation string, payload []byte) (*http.Response, error) {
 	var lastErr error
 	for attempt := 1; attempt <= requestRetryLimit; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(payload))
+		reqCtx, cancel := context.WithCancel(ctx)
+		req, err := http.NewRequestWithContext(reqCtx, method, url, bytes.NewReader(payload))
 		if err != nil {
+			cancel()
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -152,15 +181,20 @@ func doRetryableJSONRequest(ctx context.Context, client *http.Client, method, ur
 		if err == nil {
 			if shouldRetryHTTPStatus(resp.StatusCode) && attempt < requestRetryLimit {
 				retryErr := fmt.Errorf("%s returned %s", operation, resp.Status)
-				closeRetryResponse(resp)
+				closeRetryResponse(resp, cancel)
 				if err := waitForRetryResponse(ctx, attempt, operation, retryErr, resp); err != nil {
 					return nil, err
 				}
 				lastErr = retryErr
 				continue
 			}
+			keepRequestContextUntilBodyClose(resp, cancel)
 			return resp, nil
 		}
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		cancel()
 		if attempt == requestRetryLimit || !shouldRetryRequestError(err) {
 			return nil, err
 		}
@@ -175,13 +209,19 @@ func doRetryableJSONRequest(ctx context.Context, client *http.Client, method, ur
 func doRetryableRequest(ctx context.Context, client *http.Client, method, url, token, operation string) (*http.Response, error) {
 	var lastErr error
 	for attempt := 1; attempt <= requestRetryLimit; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, method, url, nil)
+		reqCtx, cancel := context.WithCancel(ctx)
+		req, err := http.NewRequestWithContext(reqCtx, method, url, nil)
 		if err != nil {
+			cancel()
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := client.Do(req)
 		if err != nil {
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			cancel()
 			if attempt == requestRetryLimit || !shouldRetryRequestError(err) {
 				return nil, err
 			}
@@ -193,13 +233,14 @@ func doRetryableRequest(ctx context.Context, client *http.Client, method, url, t
 		}
 		if shouldRetryHTTPStatus(resp.StatusCode) && attempt < requestRetryLimit {
 			retryErr := fmt.Errorf("%s returned %s", operation, resp.Status)
-			closeRetryResponse(resp)
+			closeRetryResponse(resp, cancel)
 			if err := waitForRetryResponse(ctx, attempt, operation, retryErr, resp); err != nil {
 				return nil, err
 			}
 			lastErr = retryErr
 			continue
 		}
+		keepRequestContextUntilBodyClose(resp, cancel)
 		return resp, nil
 	}
 	if lastErr == nil {
