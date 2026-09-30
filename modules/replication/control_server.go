@@ -235,6 +235,9 @@ func ServeControl(ctx context.Context) error {
 	shutdown := func() {
 		shutdownOnce.Do(func() {
 			log.Info("Stopping replication control plane: canceling active jobs")
+			s.mu.Lock()
+			s.shuttingDown = true
+			s.mu.Unlock()
 			cancelTasks()
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			if err := server.Shutdown(shutdownCtx); err != nil {
@@ -242,9 +245,6 @@ func ServeControl(ctx context.Context) error {
 				_ = server.Close()
 			}
 			cancel()
-			s.mu.Lock()
-			s.shuttingDown = true
-			s.mu.Unlock()
 			s.taskWG.Wait()
 			s.abortActiveSession()
 			log.Info("Replication control plane stopped after task cleanup")
