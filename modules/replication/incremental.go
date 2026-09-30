@@ -613,6 +613,9 @@ func readChunkFromRoot(root, resolvedRoot string, loc chunkLocation, expected st
 	if err := validateTreePath(loc.Path); err != nil {
 		return nil, err
 	}
+	if loc.Offset < 0 || loc.Size <= 0 || loc.Size > chunkMaxSize || loc.Offset > math.MaxInt64-loc.Size {
+		return nil, errors.New("invalid chunk source range")
+	}
 	path := filepath.Join(root, filepath.FromSlash(loc.Path))
 	if resolvedRoot == "" {
 		var err error
@@ -621,19 +624,36 @@ func readChunkFromRoot(root, resolvedRoot string, loc chunkLocation, expected st
 			return nil, err
 		}
 	}
-	pathResolved, err := resolvedPath(path)
-	if err != nil || !isWithin(resolvedRoot, pathResolved) {
-		return nil, errors.New("chunk source resolves outside data root")
+	path, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return nil, err
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
 		return nil, errors.New("chunk source is not a regular file")
+	}
+	pathResolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+	if !isWithin(resolvedRoot, pathResolved) {
+		return nil, errors.New("chunk source resolves outside data root")
 	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return nil, errors.New("chunk source changed while opening")
+	}
 	data := make([]byte, loc.Size)
 	if _, err := f.ReadAt(data, loc.Offset); err != nil {
 		return nil, err
