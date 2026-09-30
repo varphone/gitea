@@ -893,6 +893,29 @@ func stagingPathError(operation, rel string, err error) error {
 	return fmt.Errorf("%s staging path %q: %w", operation, rel, err)
 }
 
+func createStageTempDir(stage string, manifest *SnapshotManifest) (string, error) {
+	for {
+		dir, err := os.MkdirTemp(stage, ".replication-tmp-*")
+		if err != nil {
+			return "", err
+		}
+		rel := filepath.ToSlash(filepath.Base(dir))
+		conflicts := false
+		for _, entry := range manifest.Files {
+			if entry.Path == rel || strings.HasPrefix(entry.Path, rel+"/") {
+				conflicts = true
+				break
+			}
+		}
+		if !conflicts {
+			return dir, nil
+		}
+		if err := os.Remove(dir); err != nil {
+			return "", fmt.Errorf("remove conflicting staging temporary directory %q: %w", rel, err)
+		}
+	}
+}
+
 func pruneUnexpectedStageEntries(ctx context.Context, stage string, manifest *SnapshotManifest) error {
 	expected := make(map[string]struct{}, len(manifest.Files))
 	for _, entry := range manifest.Files {
@@ -957,6 +980,18 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	if err := pruneUnexpectedStageEntries(ctx, stage, manifest); err != nil {
 		return err
 	}
+	stageTempDir, err := createStageTempDir(stage, manifest)
+	if err != nil {
+		return fmt.Errorf("create incremental staging temporary directory: %w", err)
+	}
+	stageTempDirOwned := true
+	defer func() {
+		if stageTempDirOwned {
+			if err := os.RemoveAll(stageTempDir); err != nil {
+				log.Warn("Remove incomplete staging temporary directory failed: snapshot=%s path=%s error=%v", manifest.ID, filepath.Base(stageTempDir), err)
+			}
+		}
+	}()
 	// Keep directories writable while their children are reconstructed;
 	// the manifest permissions are restored after the complete tree exists.
 	directories := make([]TreeEntry, 0)
@@ -1019,7 +1054,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			return fmt.Errorf("index previous manifest chunks: %w", err)
 		}
 	}
-	for _, entry := range manifest.Files {
+	for entryIndex, entry := range manifest.Files {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1086,8 +1121,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			} else if err != nil && !os.IsNotExist(err) {
 				return stagingPathError("inspect file destination", entry.Path, err)
 			}
-			tmp := dst + ".replication-tmp"
-			_ = os.Remove(tmp)
+			tmp := filepath.Join(stageTempDir, strconv.Itoa(entryIndex))
 			out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(entry.Mode))
 			if err != nil {
 				return stagingPathError("create temporary file", entry.Path, err)
@@ -1161,6 +1195,10 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			}
 		}
 	}
+	if err := os.RemoveAll(stageTempDir); err != nil {
+		return fmt.Errorf("remove incremental staging temporary directory %q: %w", filepath.Base(stageTempDir), err)
+	}
+	stageTempDirOwned = false
 	for _, entry := range slices.Backward(directories) {
 		dst := filepath.Join(stage, filepath.FromSlash(entry.Path))
 		if err := os.Chmod(dst, os.FileMode(entry.Mode)); err != nil {
