@@ -16,8 +16,10 @@ outside this root is rejected.
 `SNAPSHOT_DIR` contains signed JSON manifests on the primary, not copies of
 Git, LFS, or attachment data. On the standby it also contains a temporary
 content-addressed chunk cache while a synchronization is in progress. Verified
-chunks survive an interrupted run for resumption and are removed after a
-successful atomic installation. On the standby, `SNAPSHOT_DIR` and
+chunks survive an interrupted run for resumption. Before each preflight and
+final chunk transfer, stale chunks outside the previous baseline and current
+target manifest are pruned; the cache is removed after a successful atomic installation.
+On the standby, `SNAPSHOT_DIR` and
 `APP_WORK_PATH` must be on the same local filesystem.
 
 Provision `app.ini`, system OpenSSH host keys, TLS certificates, Nginx,

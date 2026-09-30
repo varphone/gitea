@@ -617,6 +617,111 @@ func cachedChunkAvailable(cacheDir, hash string, size int64) bool {
 	return err == nil && info.Mode().IsRegular() && info.Size() == size
 }
 
+func pruneChunkCache(ctx context.Context, cacheDir, snapshotID string, manifests ...*SnapshotManifest) error {
+	keep := make(map[string]int64)
+	for _, manifest := range manifests {
+		if manifest == nil {
+			continue
+		}
+		for _, entry := range manifest.Files {
+			for _, chunk := range entry.Chunks {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				keep[chunk.Hash] = chunk.Size
+			}
+		}
+	}
+
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return err
+	}
+	var removed, removedFileBytes int64
+	var changedShards sync.Map
+	for _, shard := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		shardPath := filepath.Join(cacheDir, shard.Name())
+		if len(shard.Name()) != 2 || !isLowerHex(shard.Name()) {
+			info, err := os.Lstat(shardPath)
+			if err != nil {
+				return err
+			}
+			if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+				if err := makeTreeRemovable(ctx, shardPath); err != nil {
+					return fmt.Errorf("make unexpected cache entry removable: %w", err)
+				}
+			}
+			if err := os.RemoveAll(shardPath); err != nil {
+				return fmt.Errorf("remove unexpected cache entry %q: %w", shard.Name(), err)
+			}
+			removed++
+			if info.Mode().IsRegular() {
+				removedFileBytes += info.Size()
+			}
+			continue
+		}
+		shardInfo, err := os.Lstat(shardPath)
+		if err != nil {
+			return err
+		}
+		if !shardInfo.IsDir() || shardInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("replication chunk cache shard %q is not a real directory", shard.Name())
+		}
+		chunks, err := os.ReadDir(shardPath)
+		if err != nil {
+			return err
+		}
+		for _, chunk := range chunks {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			name := chunk.Name()
+			chunkPath := filepath.Join(shardPath, name)
+			info, err := os.Lstat(chunkPath)
+			if err != nil {
+				return err
+			}
+			wantSize, needed := keep[name]
+			if needed && len(name) == sha256.Size*2 && isLowerHex(name) && strings.HasPrefix(name, shard.Name()) && info.Mode().IsRegular() && info.Size() == wantSize {
+				continue
+			}
+			if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+				if err := makeTreeRemovable(ctx, chunkPath); err != nil {
+					return fmt.Errorf("make stale chunk cache entry removable: %w", err)
+				}
+			}
+			if err := os.RemoveAll(chunkPath); err != nil {
+				return fmt.Errorf("remove stale chunk cache entry %q: %w", name, err)
+			}
+			removed++
+			if info.Mode().IsRegular() {
+				removedFileBytes += info.Size()
+			}
+			changedShards.LoadOrStore(shard.Name(), struct{}{})
+		}
+	}
+	if removed == 0 {
+		return nil
+	}
+	hasChangedShard := false
+	changedShards.Range(func(_, _ any) bool {
+		hasChangedShard = true
+		return false
+	})
+	if !hasChangedShard {
+		if err := syncDirectory(cacheDir); err != nil {
+			return fmt.Errorf("persist replication chunk cache pruning: %w", err)
+		}
+	} else if err := syncChunkCacheDirectories(cacheDir, &changedShards); err != nil {
+		return fmt.Errorf("persist replication chunk cache pruning: %w", err)
+	}
+	log.Info("Pruned stale replication chunk cache: snapshot=%s removed_entries=%d removed_file_bytes=%d retained_hashes=%d", snapshotID, removed, removedFileBytes, len(keep))
+	return nil
+}
+
 func readCachedChunk(cacheDir, hash string) ([]byte, error) {
 	path := cachePath(cacheDir, hash)
 	info, err := os.Lstat(path)
@@ -1447,6 +1552,9 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 			cancel()
 		}
 	}()
+	if err := pruneChunkCache(ctx, cacheDir, final.ID, previous, final); err != nil {
+		return fmt.Errorf("prune stale replication chunk cache: %w", err)
+	}
 	chunkPassStarted := time.Now()
 	if err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, final, previous, cacheDir, false); err != nil {
 		log.Error("Final chunk preparation failed: snapshot=%s duration=%s error=%v", final.ID, time.Since(chunkPassStarted), err)
@@ -1640,6 +1748,9 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 		}
 		pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention, cfg.ControlToken)
 		log.Info("Received preflight manifest %s with %d entries and %s of content", preflight.ID, preflight.FileCount, strconv.FormatInt(preflight.Size, 10))
+		if err := pruneChunkCache(ctx, cacheDir, preflight.ID, previous, preflight); err != nil {
+			return fmt.Errorf("prune stale replication chunk cache: %w", err)
+		}
 		if err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, preflight, previous, cacheDir, true); err != nil {
 			return err
 		}
