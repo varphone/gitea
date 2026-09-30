@@ -363,6 +363,12 @@ func scanIncrementalTreeWithOptions(ctx context.Context, root string, base *Snap
 }
 
 func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, base *SnapshotManifest, verifyAll bool, snapshotID string) (*SnapshotManifest, error) {
+	type scannedDirectory struct {
+		path string
+		rel  string
+		info os.FileInfo
+	}
+
 	scanStarted := time.Now()
 	rootInfo, err := os.Lstat(root)
 	if err != nil {
@@ -384,6 +390,7 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 			baseEntries[entry.Path] = entry
 		}
 	}
+	directories := []scannedDirectory{{path: root, rel: ".", info: rootInfo}}
 	excludedPaths := replicationTreeExclusions(root)
 	var entriesSeen, filesSeen, filesCompleted, filesReused, filesChunked, logicalFileBytesSeen, contentBytesChunked atomic.Int64
 	progressDone := make(chan struct{})
@@ -421,6 +428,9 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 		}
 		entriesSeen.Add(1)
 		rel = filepath.ToSlash(rel)
+		if info.IsDir() {
+			directories = append(directories, scannedDirectory{path: path, rel: rel, info: info})
+		}
 		if kind, exclude := excludedPaths[rel]; exclude && info.IsDir() {
 			current, err := os.Lstat(path)
 			if err != nil {
@@ -442,6 +452,13 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 			e.LinkTarget, err = os.Readlink(path)
 			if err != nil {
 				return scanPathError(rel, err)
+			}
+			after, err := os.Lstat(path)
+			if err != nil {
+				return scanPathError(rel, err)
+			}
+			if after.Mode()&os.ModeSymlink == 0 || !os.SameFile(info, after) {
+				return fmt.Errorf("%w: %s", errIncrementalTreeChanged, rel)
 			}
 			if err := validateTreeLink(rel, e.LinkTarget); err != nil {
 				return scanPathError(rel, err)
@@ -502,6 +519,19 @@ func scanIncrementalTreeWithOptionsForTask(ctx context.Context, root string, bas
 	})
 	if err != nil {
 		return nil, err
+	}
+	for _, directory := range directories {
+		after, err := os.Lstat(directory.path)
+		if err != nil {
+			return nil, scanPathError(directory.rel, err)
+		}
+		beforeChangeID := fileChangeID(directory.info)
+		if !after.IsDir() || after.Mode()&os.ModeSymlink != 0 || !os.SameFile(directory.info, after) ||
+			uint32(after.Mode().Perm()) != uint32(directory.info.Mode().Perm()) ||
+			after.ModTime().UnixNano() != directory.info.ModTime().UnixNano() ||
+			(beforeChangeID != "" && beforeChangeID != fileChangeID(after)) {
+			return nil, fmt.Errorf("%w: %s", errIncrementalTreeChanged, directory.rel)
+		}
 	}
 	if err := validateTreeTopology(m.Files); err != nil {
 		return nil, err
