@@ -110,7 +110,7 @@ func ServeControl(ctx context.Context) error {
 	if err := validateAtomicLayout(cfg.SnapshotDir); err != nil {
 		return err
 	}
-	jobs, err := loadManifests(cfg.SnapshotDir, cfg.ControlToken)
+	jobs, transferCheckpointFound, err := loadManifests(cfg.SnapshotDir, cfg.ControlToken)
 	if err != nil {
 		return err
 	}
@@ -124,7 +124,7 @@ func ServeControl(ctx context.Context) error {
 		return fmt.Errorf("resolve replication data root: %w", err)
 	}
 	removeLegacyArchives(cfg.SnapshotDir)
-	primaryRecoveryRequired := false
+	primaryRecoveryRequired := transferCheckpointFound
 	for id, job := range jobs {
 		switch job.State {
 		case "ready", "preflight":
@@ -177,7 +177,7 @@ func ServeControl(ctx context.Context) error {
 	}
 	s.prune()
 	if primaryRecoveryRequired {
-		log.Warn("Recovering primary Gitea after interrupted final replication session")
+		log.Warn("Recovering primary Gitea after a possible interrupted final replication session")
 		s.recoverPrimary()
 	}
 	log.Info("Starting replication control plane: mode=%s listen=%s snapshot_dir=%s persisted_jobs=%d", cfg.Mode, cfg.ControlListen, cfg.SnapshotDir, len(jobs))

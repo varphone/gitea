@@ -81,17 +81,27 @@ func writeManifest(dir string, manifest *SnapshotManifest) error {
 	return writeManifestAt(manifestPath(dir, manifest.ID), manifest)
 }
 
-func loadManifests(dir, token string) (map[string]*Snapshot, error) {
+func loadManifests(dir, token string) (map[string]*Snapshot, bool, error) {
 	paths, err := listManifestPaths(dir)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	result := make(map[string]*Snapshot, len(paths))
+	transferCheckpointFound := false
 	for _, path := range paths {
 		data, err := readManifestData(path)
 		if err != nil {
 			log.Warn("Skip oversized or unreadable snapshot manifest %s: %v", path, err)
 			continue
+		}
+		var transferHint struct {
+			ID    string `json:"id"`
+			State string `json:"state"`
+		}
+		_ = json.Unmarshal(data, &transferHint)
+		if transferHint.State == "transferring" && validSnapshotID(transferHint.ID) &&
+			strings.TrimSuffix(filepath.Base(path), ".json") == transferHint.ID {
+			transferCheckpointFound = true
 		}
 		var manifest SnapshotManifest
 		if err := json.Unmarshal(data, &manifest); err != nil {
@@ -116,7 +126,7 @@ func loadManifests(dir, token string) (map[string]*Snapshot, error) {
 		}
 		result[snapshotCopy.ID] = &snapshotCopy
 	}
-	return result, nil
+	return result, transferCheckpointFound, nil
 }
 
 func localControlBase(listen string) (string, error) {
