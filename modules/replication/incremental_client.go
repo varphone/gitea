@@ -40,6 +40,7 @@ const (
 	finalChunkFetchWorkers = 8
 	preflightChunkWorkers  = 4
 	statusBodyPreviewLimit = 4 << 10
+	maxRetryResponseDrain  = 64 << 10
 )
 
 var syncBusyRetryDelay = time.Second
@@ -90,6 +91,14 @@ func responseRetryDelay(resp *http.Response, fallback time.Duration) time.Durati
 
 func shouldRetryHTTPStatus(status int) bool {
 	return status == http.StatusInternalServerError || status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+}
+
+func closeRetryResponse(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxRetryResponseDrain))
+	_ = resp.Body.Close()
 }
 
 func shouldRetryRequestError(err error) bool {
@@ -143,7 +152,7 @@ func doRetryableJSONRequest(ctx context.Context, client *http.Client, method, ur
 		if err == nil {
 			if shouldRetryHTTPStatus(resp.StatusCode) && attempt < requestRetryLimit {
 				retryErr := fmt.Errorf("%s returned %s", operation, resp.Status)
-				_ = resp.Body.Close()
+				closeRetryResponse(resp)
 				if err := waitForRetryResponse(ctx, attempt, operation, retryErr, resp); err != nil {
 					return nil, err
 				}
@@ -184,7 +193,7 @@ func doRetryableRequest(ctx context.Context, client *http.Client, method, url, t
 		}
 		if shouldRetryHTTPStatus(resp.StatusCode) && attempt < requestRetryLimit {
 			retryErr := fmt.Errorf("%s returned %s", operation, resp.Status)
-			_ = resp.Body.Close()
+			closeRetryResponse(resp)
 			if err := waitForRetryResponse(ctx, attempt, operation, retryErr, resp); err != nil {
 				return nil, err
 			}
