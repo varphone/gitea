@@ -82,15 +82,15 @@ var gearValueTable = func() [256]uint64 {
 // splitFile uses content-defined boundaries, so an insertion does not
 // invalidate every following chunk as fixed-size blocks would.
 func splitFile(ctx context.Context, path string) ([]ChunkDescriptor, error) {
-	f, err := os.Open(path)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	f, info, err := openRegularFile(path, info)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -857,18 +857,11 @@ func readChunkFromRoot(root, resolvedRoot string, loc chunkLocation, expected st
 	if !isWithin(resolvedRoot, pathResolved) {
 		return nil, errors.New("chunk source resolves outside data root")
 	}
-	f, err := os.Open(path)
+	f, _, err := openRegularFile(path, info)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	openedInfo, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
-		return nil, errors.New("chunk source changed while opening")
-	}
 	data := make([]byte, loc.Size)
 	if _, err := f.ReadAt(data, loc.Offset); err != nil {
 		return nil, err
@@ -1014,18 +1007,9 @@ func openManifestFile(path string) (*os.File, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("incremental manifest is not a regular file")
 	}
-	file, err := os.Open(path)
+	file, openedInfo, err := openRegularFile(path, info)
 	if err != nil {
-		return nil, err
-	}
-	openedInfo, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
-		_ = file.Close()
-		return nil, errors.New("incremental manifest changed while opening")
+		return nil, fmt.Errorf("open incremental manifest: %w", err)
 	}
 	if openedInfo.Size() > int64(maxManifestSize) {
 		_ = file.Close()

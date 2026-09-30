@@ -261,7 +261,11 @@ func newReplicateHTTPClient(cfg *config) (*http.Client, error) {
 }
 
 func verifyFile(path, expected string) error {
-	f, err := os.Open(path)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	f, _, err := openRegularFile(path, info)
 	if err != nil {
 		return err
 	}

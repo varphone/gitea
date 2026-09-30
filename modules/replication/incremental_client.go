@@ -571,16 +571,12 @@ func readCachedChunk(cacheDir, hash string) ([]byte, error) {
 	if !info.Mode().IsRegular() || info.Size() > chunkMaxSize {
 		return nil, errors.New("cached chunk is not a regular file within the size limit")
 	}
-	file, err := os.Open(path)
+	file, openedInfo, err := openRegularFile(path, info)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) || openedInfo.Size() > chunkMaxSize {
+	if openedInfo.Size() > chunkMaxSize {
 		return nil, errors.New("cached chunk is not a regular file within the size limit")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, chunkMaxSize+1))
@@ -1241,18 +1237,11 @@ func readStageCheckpoint(path string) (stageCheckpoint, error) {
 	if !info.Mode().IsRegular() || info.Size() > maxStageCheckpointSize {
 		return stageCheckpoint{}, errors.New("invalid staging checkpoint file")
 	}
-	file, err := os.Open(path)
+	file, _, err := openRegularFile(path, info)
 	if err != nil {
-		return stageCheckpoint{}, err
+		return stageCheckpoint{}, fmt.Errorf("open staging checkpoint: %w", err)
 	}
 	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return stageCheckpoint{}, err
-	}
-	if !os.SameFile(info, openedInfo) {
-		return stageCheckpoint{}, errors.New("staging checkpoint changed while opening")
-	}
 	var checkpoint stageCheckpoint
 	if err := decodeBoundedJSON(file, maxStageCheckpointSize, &checkpoint); err != nil {
 		return stageCheckpoint{}, err

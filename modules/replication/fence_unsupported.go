@@ -16,6 +16,8 @@ type restoreRunLock struct{}
 
 var errRestoreAlreadyRunning = errors.New("another replication restore is already running")
 
+var acquireSnapshotFence = AcquireSnapshotFence
+
 func acquireRestoreRunLock(string) (*restoreRunLock, error) {
 	return nil, errors.New("disaster-recovery restore locking requires Linux")
 }
