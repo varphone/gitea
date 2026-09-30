@@ -591,19 +591,26 @@ func pruneManifestFiles(dir string, retention int, tokens ...string) {
 		}
 	}
 	sort.Strings(manifests)
-	for len(manifests) > retention {
-		if err := os.Remove(manifests[0]); err == nil {
-			removed++
-		} else {
-			log.Warn("Cannot prune replication manifest %s: %v", manifests[0], err)
+	removeCount := len(manifests) - retention
+	removedManifests := 0
+	for _, manifest := range manifests {
+		if removedManifests >= removeCount {
+			break
 		}
-		manifests = manifests[1:]
+		if err := os.Remove(manifest); err == nil {
+			removed++
+			removedManifests++
+		} else {
+			log.Warn("Cannot prune replication manifest %s: %v", manifest, err)
+		}
 	}
 	if removed > 0 {
 		if err := syncDirectory(dir); err != nil {
 			log.Warn("Cannot persist replication manifest pruning in %s: %v", dir, err)
 		}
-		log.Info("Pruned %d replication manifest files; retained %d snapshot manifests", removed, len(manifests))
+	}
+	if removedManifests > 0 {
+		log.Info("Pruned %d replication manifest files; retained %d snapshot manifests", removedManifests, len(manifests)-removedManifests)
 	}
 }
 
