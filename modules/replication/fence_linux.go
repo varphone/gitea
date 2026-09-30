@@ -68,7 +68,20 @@ func openFence() (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(writeFencePath), 0o750); err != nil {
 		return nil, err
 	}
-	return os.OpenFile(writeFencePath, os.O_CREATE|os.O_RDWR, 0o640)
+	fd, err := unix.Open(writeFencePath, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o640)
+	if err != nil {
+		return nil, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		_ = unix.Close(fd)
+		return nil, errors.New("replication write fence must be a regular file")
+	}
+	return os.NewFile(uintptr(fd), writeFencePath), nil
 }
 
 // AcquireSnapshotFence blocks new SSH writes and waits for active SSH writes.
