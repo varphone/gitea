@@ -456,7 +456,7 @@ func pollManifestTask(ctx context.Context, client *http.Client, base, token, id,
 }
 
 func requestChunk(ctx context.Context, client *http.Client, base, token, id, hash string) ([]byte, error) {
-	operation := "request chunk " + hash
+	operation := fmt.Sprintf("request chunk: snapshot=%s hash=%s", id, hash)
 	for attempt := 1; attempt <= requestRetryLimit; attempt++ {
 		resp, err := doRetryableRequest(ctx, client, http.MethodGet, base+"/api/v1/replication/sync-jobs/"+id+"/chunks/"+hash, token, operation)
 		if err != nil {
@@ -779,7 +779,7 @@ func fetchPreflightChunksConcurrently(ctx context.Context, client *http.Client, 
 					if errors.As(err, &changed) {
 						count := deferred.Add(1)
 						if count <= chunkChangeWarnBurst {
-							log.Warn("Preflight chunk %s changed; defer it to final sync", hash)
+							log.Warn("Preflight chunk changed; snapshot=%s hash=%s deferred_to=final_sync", id, hash)
 						} else if count%chunkProgressLogStride == 0 {
 							processed := int64(cached) + fetched.Load() + count
 							log.Warn("Preflight progress for snapshot %s remains unstable: processed=%d/%d fetched=%d cached=%d deferred=%d", id, processed, total, fetched.Load(), cached, count)
