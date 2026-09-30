@@ -624,6 +624,14 @@ func storeChunk(cacheDir, hash string, data []byte) error {
 		if info.Mode().IsRegular() && verifyFile(path, hash) == nil {
 			return nil
 		}
+		if info.IsDir() {
+			if err := makeTreeRemovable(context.Background(), path); err != nil {
+				return fmt.Errorf("make invalid chunk cache directory removable: %w", err)
+			}
+			if err := os.RemoveAll(path); err != nil {
+				return fmt.Errorf("remove invalid chunk cache directory: %w", err)
+			}
+		}
 	} else if !os.IsNotExist(err) {
 		return err
 	}
