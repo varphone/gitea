@@ -52,9 +52,10 @@ retries; later restore runs scan current primary metadata again.
    their hashes without rereading their contents.
 3. Only chunks changed since preflight are transferred while the primary is
    stopped. The standby fetches final chunks with up to eight concurrent
-   requests, then reconstructs a durable staging tree, hard-linking unchanged
-   complete files where possible. Missing paths in the new manifest are
-   deletions and are not reconstructed.
+   requests, then reconstructs a durable staging tree. It uses filesystem
+   reflinks for unchanged complete files where supported and copies them when
+   reflinks are unavailable. Missing paths in the new manifest are deletions
+   and are not reconstructed.
 4. After the standby confirms the staging tree is durable, the primary starts
    Gitea, passes its health check, releases the write fence, and marks the
    signed manifest ready.
@@ -179,11 +180,13 @@ and the independent bearer token.
 ## Capacity and failure behavior
 
 The primary needs space only for manifests. The standby needs its active data,
-the current delta chunk cache, and staging metadata. Unchanged files are
-hard-linked into staging, so they consume no second copy. Changed files require
-temporary space equal to their reconstructed size until the atomic switch and
-old-tree cleanup complete. A failed activation retains one failed staging tree
-for diagnosis; the next failed activation replaces it, and a successful restore
+the current delta chunk cache, and staging space. Filesystem reflinks share
+unchanged file extents initially, but files must be copied when reflinks are
+unavailable. Changed files are reconstructed in staging and require space equal
+to their target size until the atomic switch and old-tree cleanup complete.
+Plan for a full additional copy of unchanged files when the filesystem does not
+support reflinks. A failed activation retains one failed staging tree for
+diagnosis; the next failed activation replaces it, and a successful restore
 clears it.
 
 An interrupted preflight leaves Gitea online. An interrupted final session is
