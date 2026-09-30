@@ -280,6 +280,10 @@ func replicationTreeExclusions(root string) map[string]string {
 	if err != nil || resolvedRoot != root {
 		return nil
 	}
+	appDataPath, err := resolvedPath(setting.AppDataPath)
+	if err != nil || !isWithin(root, appDataPath) {
+		return nil
+	}
 	protectedPaths := []string{setting.Database.Path, setting.RepoRootPath, setting.CustomPath}
 	for _, storage := range []*setting.Storage{
 		setting.Attachment.Storage, setting.LFS.Storage, setting.Avatar.Storage,
@@ -299,6 +303,10 @@ func replicationTreeExclusions(root string) map[string]string {
 		}
 		candidatePath, err := filepath.Abs(filepath.Clean(candidate.path))
 		if err != nil || candidatePath == root || !isWithin(root, candidatePath) {
+			continue
+		}
+		// Keep APP_DATA_PATH and its contents whenever an exclusion would hide the whole data directory.
+		if isWithin(candidatePath, appDataPath) {
 			continue
 		}
 		resolvedCandidate, resolveErr := resolvedPath(candidatePath)
