@@ -525,11 +525,34 @@ func indexManifest(m *SnapshotManifest) map[string]chunkLocation {
 	return index
 }
 
+func indexManifestContext(ctx context.Context, m *SnapshotManifest) (map[string]chunkLocation, error) {
+	index := make(map[string]chunkLocation)
+	for _, entry := range m.Files {
+		for _, chunk := range entry.Chunks {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if _, ok := index[chunk.Hash]; !ok {
+				index[chunk.Hash] = chunkLocation{entry.Path, chunk.Offset, chunk.Size}
+			}
+		}
+	}
+	return index, nil
+}
+
 func indexManifestWithAlternates(m *SnapshotManifest) (map[string]chunkLocation, map[string][]chunkLocation) {
+	primary, alternates, _ := indexManifestWithAlternatesContext(context.Background(), m)
+	return primary, alternates
+}
+
+func indexManifestWithAlternatesContext(ctx context.Context, m *SnapshotManifest) (map[string]chunkLocation, map[string][]chunkLocation, error) {
 	primary := make(map[string]chunkLocation)
 	alternates := make(map[string][]chunkLocation)
 	for _, entry := range m.Files {
 		for _, chunk := range entry.Chunks {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
 			candidate := chunkLocation{entry.Path, chunk.Offset, chunk.Size}
 			first, ok := primary[chunk.Hash]
 			if !ok {
@@ -539,7 +562,7 @@ func indexManifestWithAlternates(m *SnapshotManifest) (map[string]chunkLocation,
 			addChunkAlternate(alternates, chunk.Hash, first, candidate)
 		}
 	}
-	return primary, alternates
+	return primary, alternates, nil
 }
 
 func addChunkAlternate(alternates map[string][]chunkLocation, hash string, primary, candidate chunkLocation) {
@@ -566,14 +589,17 @@ func addChunkAlternate(alternates map[string][]chunkLocation, hash string, prima
 	}
 }
 
-func manifestChunkSet(m *SnapshotManifest) map[string]struct{} {
+func manifestChunkSet(ctx context.Context, m *SnapshotManifest) (map[string]struct{}, error) {
 	chunks := make(map[string]struct{})
 	for _, entry := range m.Files {
 		for _, chunk := range entry.Chunks {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			chunks[chunk.Hash] = struct{}{}
 		}
 	}
-	return chunks
+	return chunks, nil
 }
 
 func readChunk(root string, loc chunkLocation, expected string) ([]byte, error) {

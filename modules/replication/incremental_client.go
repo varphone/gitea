@@ -599,12 +599,22 @@ func transferRateMiBPerSecond(size int64, duration time.Duration) float64 {
 }
 
 func fetchMissingChunks(ctx context.Context, client *http.Client, base, token string, manifest, previous *SnapshotManifest, cacheDir string, tolerateChanges bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	passStarted := time.Now()
 	var available map[string]struct{}
 	if previous != nil {
-		available = manifestChunkSet(previous)
+		var err error
+		available, err = manifestChunkSet(ctx, previous)
+		if err != nil {
+			return err
+		}
 	}
-	manifestChunks := indexManifest(manifest)
+	manifestChunks, err := indexManifestContext(ctx, manifest)
+	if err != nil {
+		return err
+	}
 	total := len(manifestChunks)
 	if !tolerateChanges {
 		skipped := 0
@@ -612,6 +622,9 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 		missing := make([]string, 0, total)
 		var missingBytes int64
 		for hash, location := range manifestChunks {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if _, ok := available[hash]; ok || cachedChunkAvailable(cacheDir, hash, location.Size) {
 				skipped++
 				cachedCandidateBytes += location.Size
@@ -630,6 +643,9 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 	var cachedCandidateBytes, missingBytes int64
 	missing := make([]string, 0, total)
 	for hash, location := range manifestChunks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, ok := available[hash]; ok || cachedChunkAvailable(cacheDir, hash, location.Size) {
 			skipped++
 			cachedCandidateBytes += location.Size
@@ -643,7 +659,7 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 
 func fetchChunksConcurrently(ctx context.Context, client *http.Client, base, token, id string, hashes []string, cacheDir string, total, cached int, totalBytes int64) error {
 	if len(hashes) == 0 {
-		return nil
+		return ctx.Err()
 	}
 	started := time.Now()
 	workerCtx, cancel := context.WithCancel(ctx)
@@ -716,6 +732,9 @@ sendJobs:
 
 func fetchPreflightChunksConcurrently(ctx context.Context, client *http.Client, base, token, id string, hashes []string, cacheDir string, total, cached int, cachedBytes, expectedBytes int64, preparationDuration time.Duration) error {
 	if len(hashes) == 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		log.Info("Finished preflight chunk pass for snapshot %s: fetched=0 downloaded_bytes=0 reusable_candidates=%d reusable_candidate_bytes=%d deferred=0 total=%d duration=%s", id, cached, cachedBytes, total, preparationDuration)
 		return nil
 	}
@@ -914,6 +933,9 @@ func pruneUnexpectedStageEntries(ctx context.Context, stage string, manifest *Sn
 }
 
 func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, manifest, previous *SnapshotManifest, fetch func(string) ([]byte, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	stageInfo, err := os.Lstat(stage)
 	if err != nil {
 		return err
@@ -928,6 +950,9 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	// the manifest permissions are restored after the complete tree exists.
 	directories := make([]TreeEntry, 0)
 	for _, entry := range manifest.Files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if entry.Type == "dir" {
 			directories = append(directories, entry)
 		}
@@ -968,9 +993,16 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	verifyLocal := previous != nil && !manifest.FullScanAt.IsZero() && manifest.FullScanAt.After(previous.FullScanAt)
 	if previous != nil {
 		for _, entry := range previous.Files {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			oldEntries[entry.Path] = entry
 		}
-		oldChunks, oldChunkAlternates = indexManifestWithAlternates(previous)
+		var err error
+		oldChunks, oldChunkAlternates, err = indexManifestWithAlternatesContext(ctx, previous)
+		if err != nil {
+			return err
+		}
 	}
 	for _, entry := range manifest.Files {
 		if err := ctx.Err(); err != nil {
@@ -1123,6 +1155,9 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 		if err := os.Chtimes(dst, mtime, mtime); err != nil {
 			return err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return os.Chmod(stage, os.FileMode(manifest.RootMode))
 }
