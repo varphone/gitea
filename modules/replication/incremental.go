@@ -525,44 +525,45 @@ func indexManifest(m *SnapshotManifest) map[string]chunkLocation {
 	return index
 }
 
-func indexManifestAlternates(m *SnapshotManifest, primary map[string]chunkLocation) map[string][]chunkLocation {
+func indexManifestWithAlternates(m *SnapshotManifest) (map[string]chunkLocation, map[string][]chunkLocation) {
+	primary := make(map[string]chunkLocation)
 	alternates := make(map[string][]chunkLocation)
 	for _, entry := range m.Files {
 		for _, chunk := range entry.Chunks {
-			first, ok := primary[chunk.Hash]
-			if !ok || (first.Path == entry.Path && first.Offset == chunk.Offset) {
-				continue
-			}
-			locations := alternates[chunk.Hash]
-			if entry.Path != first.Path {
-				pathSeen := false
-				for _, location := range locations {
-					if location.Path == entry.Path {
-						pathSeen = true
-						break
-					}
-				}
-				if pathSeen {
-					continue
-				}
-			}
 			candidate := chunkLocation{entry.Path, chunk.Offset, chunk.Size}
-			if len(locations) < maxChunkSourceAlternates {
-				alternates[chunk.Hash] = append(locations, candidate)
+			first, ok := primary[chunk.Hash]
+			if !ok {
+				primary[chunk.Hash] = candidate
 				continue
 			}
-			if entry.Path != first.Path {
-				for i := range slices.Backward(locations) {
-					if locations[i].Path == first.Path {
-						locations[i] = candidate
-						alternates[chunk.Hash] = locations
-						break
-					}
-				}
+			addChunkAlternate(alternates, chunk.Hash, first, candidate)
+		}
+	}
+	return primary, alternates
+}
+
+func addChunkAlternate(alternates map[string][]chunkLocation, hash string, primary, candidate chunkLocation) {
+	locations := alternates[hash]
+	if candidate.Path != primary.Path {
+		for _, location := range locations {
+			if location.Path == candidate.Path {
+				return
 			}
 		}
 	}
-	return alternates
+	if len(locations) < maxChunkSourceAlternates {
+		alternates[hash] = append(locations, candidate)
+		return
+	}
+	if candidate.Path != primary.Path {
+		for i := range slices.Backward(locations) {
+			if locations[i].Path == primary.Path {
+				locations[i] = candidate
+				alternates[hash] = locations
+				return
+			}
+		}
+	}
 }
 
 func manifestChunkSet(m *SnapshotManifest) map[string]struct{} {

@@ -964,12 +964,13 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	}
 	oldEntries := map[string]TreeEntry{}
 	oldChunks := map[string]chunkLocation{}
+	oldChunkAlternates := map[string][]chunkLocation{}
 	verifyLocal := previous != nil && !manifest.FullScanAt.IsZero() && manifest.FullScanAt.After(previous.FullScanAt)
 	if previous != nil {
 		for _, entry := range previous.Files {
 			oldEntries[entry.Path] = entry
 		}
-		oldChunks = indexManifest(previous)
+		oldChunks, oldChunkAlternates = indexManifestWithAlternates(previous)
 	}
 	for _, entry := range manifest.Files {
 		if err := ctx.Err(); err != nil {
@@ -1051,7 +1052,16 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 				} else if location, ok := oldChunks[chunk.Hash]; ok {
 					data, err = readChunk(root, location, chunk.Hash)
 					if err != nil {
-						data = nil
+						for _, alternate := range oldChunkAlternates[chunk.Hash] {
+							data, err = readChunk(root, alternate, chunk.Hash)
+							if err == nil {
+								log.Debug("Reused replication chunk from alternate local manifest location: snapshot=%s hash=%s path=%s", manifest.ID, chunk.Hash, alternate.Path)
+								break
+							}
+						}
+						if err != nil {
+							data = nil
+						}
 					}
 				}
 				if data == nil {
