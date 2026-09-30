@@ -542,22 +542,49 @@ func (s *controlServer) finishSession(id string, success bool) error {
 		}
 		jobCopy := *job
 		s.mu.Unlock()
-		if manifest, err := loadManifestFile(manifestPath(s.cfg.SnapshotDir, id)); err == nil {
+		manifest, loadErr := loadManifestFile(manifestPath(s.cfg.SnapshotDir, id))
+		if loadErr != nil {
+			log.Warn("Cannot load finalized replication manifest %s from disk; using in-memory copy: %v", id, loadErr)
+			manifest = s.getTaskManifest(id)
+		}
+		var manifestErr error
+		if manifest == nil {
+			if loadErr == nil {
+				manifestErr = fmt.Errorf("load finalized replication manifest %s: no manifest available", id)
+			} else {
+				manifestErr = fmt.Errorf("load finalized replication manifest %s: %w", id, loadErr)
+			}
+		} else {
 			manifest.Snapshot = jobCopy
 			if err := signIncrementalManifest(manifest, s.cfg.ControlToken); err != nil {
-				log.Error("Sign completed disaster-recovery manifest: %v", err)
+				manifestErr = fmt.Errorf("sign finalized replication manifest %s: %w", id, err)
 			} else if err := writeManifest(s.cfg.SnapshotDir, manifest); err != nil {
-				log.Error("Persist completed disaster-recovery manifest: %v", err)
-			} else if success && finishErr == nil {
-				s.setTaskManifest(manifest)
-				if err := writeManifestAt(baselineManifestPath(s.cfg.SnapshotDir), manifest); err != nil {
-					log.Error("Persist disaster-recovery scan baseline: %v", err)
+				manifestErr = fmt.Errorf("persist finalized replication manifest %s: %w", id, err)
+			}
+		}
+		if manifestErr != nil {
+			finishErr = errors.Join(finishErr, manifestErr)
+			log.Error("Finalize replication manifest %s failed: %v", id, manifestErr)
+			s.mu.Lock()
+			job.State, job.Error = "failed", finishErr.Error()
+			jobCopy = *job
+			s.mu.Unlock()
+			if manifest != nil {
+				manifest.Snapshot = jobCopy
+				if err := signIncrementalManifest(manifest, s.cfg.ControlToken); err != nil {
+					log.Error("Sign failed disaster-recovery manifest: snapshot=%s error=%v", id, err)
+				} else if err := writeManifest(s.cfg.SnapshotDir, manifest); err != nil {
+					log.Error("Persist failed disaster-recovery manifest: snapshot=%s error=%v", id, err)
 				}
-			} else {
 				s.setTaskManifest(manifest)
 			}
 		} else {
-			log.Warn("Cannot update finalized replication manifest %s: %v", id, err)
+			s.setTaskManifest(manifest)
+			if success && finishErr == nil {
+				if err := writeManifestAt(baselineManifestPath(s.cfg.SnapshotDir), manifest); err != nil {
+					log.Error("Persist disaster-recovery scan baseline: %v", err)
+				}
+			}
 		}
 	}
 	if session.cancel != nil {
