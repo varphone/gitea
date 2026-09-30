@@ -197,15 +197,14 @@ func ServeControl(ctx context.Context) error {
 				continue
 			}
 			s.taskManifests[id] = manifest
-			var index map[string]chunkLocation
 			if manifest.State == "preflight" {
-				var alternates map[string][]chunkLocation
-				index, alternates = indexManifestWithAlternates(manifest)
+				index, alternates, err := indexManifestWithAlternatesContext(ctx, manifest)
+				if err != nil {
+					return fmt.Errorf("index persisted preflight manifest %s: %w", id, err)
+				}
+				s.taskChunkIndexes[id] = index
 				s.taskChunkAlternates[id] = alternates
-			} else {
-				index = indexManifest(manifest)
 			}
-			s.taskChunkIndexes[id] = index
 			jobs[id] = job
 		case "transferring":
 			primaryRecoveryRequired = true
@@ -532,32 +531,60 @@ func (s *controlServer) tryAcquireChunkSlot() (chan struct{}, bool) {
 	}
 }
 
-func (s *controlServer) setTaskManifest(manifest *SnapshotManifest) {
+func (s *controlServer) setTaskManifest(ctx context.Context, manifest *SnapshotManifest) error {
+	manifestCopy := *manifest
+	var index map[string]chunkLocation
+	var alternates map[string][]chunkLocation
+	indexed := false
+	indexStarted := time.Now()
+	switch manifestCopy.State {
+	case "preflight":
+		var err error
+		index, alternates, err = indexManifestWithAlternatesContext(ctx, &manifestCopy)
+		if err != nil {
+			return fmt.Errorf("index preflight manifest %s: %w", manifest.ID, err)
+		}
+		indexed = true
+	case "transferring":
+		var err error
+		index, err = indexManifestContext(ctx, &manifestCopy)
+		if err != nil {
+			return fmt.Errorf("index transferring manifest %s: %w", manifest.ID, err)
+		}
+		indexed = true
+	}
+	if indexed {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.taskManifests == nil {
 		s.taskManifests = map[string]*SnapshotManifest{}
 	}
-	manifestCopy := *manifest
 	s.taskManifests[manifest.ID] = &manifestCopy
 	if s.taskChunkIndexes == nil {
 		s.taskChunkIndexes = map[string]map[string]chunkLocation{}
 	}
-	var index map[string]chunkLocation
+	if indexed {
+		s.taskChunkIndexes[manifest.ID] = index
+	} else {
+		delete(s.taskChunkIndexes, manifest.ID)
+	}
 	if manifestCopy.State == "preflight" {
-		var alternates map[string][]chunkLocation
-		index, alternates = indexManifestWithAlternates(&manifestCopy)
 		if s.taskChunkAlternates == nil {
 			s.taskChunkAlternates = map[string]map[string][]chunkLocation{}
 		}
 		s.taskChunkAlternates[manifest.ID] = alternates
-	} else {
-		index = indexManifest(&manifestCopy)
-		if s.taskChunkAlternates != nil {
-			delete(s.taskChunkAlternates, manifest.ID)
-		}
+	} else if s.taskChunkAlternates != nil {
+		delete(s.taskChunkAlternates, manifest.ID)
 	}
-	s.taskChunkIndexes[manifest.ID] = index
+	s.mu.Unlock()
+	if indexed {
+		log.Info("Indexed replication manifest chunks: snapshot=%s state=%s unique_chunks=%d alternate_hashes=%d duration=%s", manifest.ID, manifestCopy.State, len(index), len(alternates), time.Since(indexStarted))
+	}
+	return nil
 }
 
 func isReplicationTemporaryFile(name string) bool {

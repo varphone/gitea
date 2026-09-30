@@ -806,26 +806,35 @@ func validateIncrementalManifest(m *SnapshotManifest) error {
 }
 
 func indexManifest(m *SnapshotManifest) map[string]chunkLocation {
+	index, _ := indexManifestContext(context.Background(), m)
+	return index
+}
+
+func indexManifestContext(ctx context.Context, m *SnapshotManifest) (map[string]chunkLocation, error) {
 	index := make(map[string]chunkLocation)
 	for _, e := range m.Files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		for _, c := range e.Chunks {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if _, ok := index[c.Hash]; !ok {
 				index[c.Hash] = chunkLocation{e.Path, c.Offset, c.Size}
 			}
 		}
 	}
-	return index
-}
-
-func indexManifestWithAlternates(m *SnapshotManifest) (map[string]chunkLocation, map[string][]chunkLocation) {
-	primary, alternates, _ := indexManifestWithAlternatesContext(context.Background(), m)
-	return primary, alternates
+	return index, nil
 }
 
 func indexManifestWithAlternatesContext(ctx context.Context, m *SnapshotManifest) (map[string]chunkLocation, map[string][]chunkLocation, error) {
 	primary := make(map[string]chunkLocation)
 	alternates := make(map[string][]chunkLocation)
 	for _, entry := range m.Files {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		for _, chunk := range entry.Chunks {
 			if err := ctx.Err(); err != nil {
 				return nil, nil, err

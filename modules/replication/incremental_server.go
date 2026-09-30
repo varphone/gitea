@@ -332,7 +332,11 @@ scanAttempts:
 		s.failAsyncJob(id, err)
 		return
 	}
-	s.setTaskManifest(manifest)
+	if err := s.setTaskManifest(ctx, manifest); err != nil {
+		log.Error("Preflight task %s chunk index failed after %s: %v", id, time.Since(taskStarted), err)
+		s.failAsyncJob(id, err)
+		return
+	}
 	log.Info("Preflight task %s completed: mode=%s base=%s entries=%d bytes=%d scan_duration=%s total_duration=%s", id, scanMode, baseID, manifest.FileCount, manifest.Size, scanDuration, time.Since(taskStarted))
 	s.prune()
 	s.completeAsyncJob(id, manifest.Snapshot)
@@ -504,7 +508,14 @@ func (s *controlServer) runFinalizeTask(id, baseID, requestID string) {
 		s.failAsyncJob(id, err)
 		return
 	}
-	s.setTaskManifest(manifest)
+	if err := s.setTaskManifest(outageCtx, manifest); err != nil {
+		s.recoverPrimary()
+		err = releaseFinalizeFence(id, fence, err)
+		outageCancel()
+		log.Error("Finalize task %s chunk index failed: primary_outage=%s total_duration=%s error=%v", id, time.Since(outageStarted), time.Since(taskStarted), err)
+		s.failAsyncJob(id, err)
+		return
+	}
 	deadline, _ := outageCtx.Deadline()
 	session := &finalSyncSession{id: manifest.ID, fence: fence, cancel: outageCancel, expiresAt: deadline, finished: make(chan struct{})}
 	s.mu.Lock()
@@ -700,10 +711,16 @@ func (s *controlServer) finishSession(id string, success bool) error {
 				} else if err := writeManifest(s.cfg.SnapshotDir, manifest); err != nil {
 					log.Error("Persist failed disaster-recovery manifest: snapshot=%s error=%v", id, err)
 				}
-				s.setTaskManifest(manifest)
+				if err := s.setTaskManifest(context.Background(), manifest); err != nil {
+					finishErr = errors.Join(finishErr, err)
+					log.Error("Update failed replication task manifest in memory failed: snapshot=%s error=%v", id, err)
+				}
 			}
 		} else {
-			s.setTaskManifest(manifest)
+			if err := s.setTaskManifest(context.Background(), manifest); err != nil {
+				finishErr = errors.Join(finishErr, err)
+				log.Error("Update finalized replication task manifest in memory failed: snapshot=%s error=%v", id, err)
+			}
 			if success && finishErr == nil {
 				if err := writeManifestAt(baselineManifestPath(s.cfg.SnapshotDir), manifest); err != nil {
 					log.Error("Persist disaster-recovery scan baseline: %v", err)
