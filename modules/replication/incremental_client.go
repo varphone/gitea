@@ -609,19 +609,46 @@ func previousManifest(path, token string) *SnapshotManifest {
 		if !os.IsNotExist(err) {
 			log.Warn("Ignoring persisted standby baseline %s: %v", path, err)
 		}
-		return nil
-	}
-	manifest, recoveryErr := recoverTrustedBaseline(path, token)
-	if recoveryErr != nil {
-		log.Warn("Ignoring persisted standby baseline %s: %v", path, recoveryErr)
-		return nil
-	}
-	if err := writeManifestAt(path, manifest); err != nil {
-		log.Warn("Recovered persisted standby baseline %s but could not rewrite it: %v", path, err)
 	} else {
-		log.Warn("Recovered persisted standby baseline %s with trailing data; rewrote canonical manifest", path)
+		manifest, recoveryErr := recoverTrustedBaseline(path, token)
+		if recoveryErr == nil {
+			if err := writeManifestAt(path, manifest); err != nil {
+				log.Warn("Recovered persisted standby baseline %s but could not rewrite it: %v", path, err)
+			} else {
+				log.Warn("Recovered persisted standby baseline %s with trailing data; rewrote canonical manifest", path)
+			}
+			return manifest
+		}
+		log.Warn("Ignoring persisted standby baseline %s: %v", path, recoveryErr)
 	}
-	return manifest
+	if manifest := latestTrustedReadyManifest(filepath.Dir(path), token); manifest != nil {
+		log.Warn("Using retained standby baseline %s because current checkpoint %s is unavailable", manifest.ID, path)
+		return manifest
+	}
+	return nil
+}
+
+func latestTrustedReadyManifest(snapshotDir, token string) *SnapshotManifest {
+	paths, err := listManifestPaths(snapshotDir)
+	if err != nil {
+		log.Warn("Cannot list standby manifests for baseline recovery in %s: %v", snapshotDir, err)
+		return nil
+	}
+	var latest *SnapshotManifest
+	for _, path := range paths {
+		id := strings.TrimSuffix(filepath.Base(path), ".json")
+		if !validSnapshotID(id) {
+			continue
+		}
+		manifest, err := loadTrustedManifest(path, token, "ready")
+		if err != nil || manifest.ID != id {
+			continue
+		}
+		if newerManifest(manifest, latest) {
+			latest = manifest
+		}
+	}
+	return latest
 }
 
 // recoverTrustedBaseline accepts only the first JSON value in a local ready
