@@ -492,8 +492,11 @@ func writeJSONMaybeGzip(w http.ResponseWriter, r *http.Request, payload any) {
 		if err == nil {
 			w.Header().Set("Content-Encoding", "gzip")
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(writer).Encode(payload)
-			_ = writer.Close()
+			encodeErr := json.NewEncoder(writer).Encode(payload)
+			closeErr := writer.Close()
+			if err := errors.Join(encodeErr, closeErr); err != nil {
+				log.Debug("Failed to write compressed replication JSON response: error=%v", err)
+			}
 			return
 		}
 	}
@@ -596,5 +599,7 @@ func writeChunk(w http.ResponseWriter, r *http.Request, data []byte) (int, bool,
 func writeJSONStatus(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		log.Debug("Failed to write replication JSON response: status=%d error=%v", status, err)
+	}
 }
