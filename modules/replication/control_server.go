@@ -68,12 +68,11 @@ func primaryOutageCheckpointExists(snapshotDir string) bool {
 
 func clearPrimaryOutageCheckpoint(snapshotDir string) error {
 	path := primaryOutageCheckpointPath(snapshotDir)
-	if err := os.Remove(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	// Sync even when the checkpoint is already absent: a previous removal may
+	// have succeeded while its directory sync failed.
 	return syncDirectory(snapshotDir)
 }
 
