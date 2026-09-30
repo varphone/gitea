@@ -1606,6 +1606,31 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			fileCount++
 		}
 	}
+	var progressFilesStarted, progressFilesCompleted, progressChunksWritten, progressPayloadBytes atomic.Int64
+	progressDone := make(chan struct{})
+	var progressWorkers sync.WaitGroup
+	progressWorkers.Go(func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-progressDone:
+				return
+			case <-ticker.C:
+				log.Info("Incremental staging progress: snapshot=%s files_started=%d files_completed=%d/%d chunks_written=%d chunk_payload_bytes_written=%d elapsed=%s", manifest.ID, progressFilesStarted.Load(), progressFilesCompleted.Load(), fileCount, progressChunksWritten.Load(), progressPayloadBytes.Load(), time.Since(stageStarted))
+			}
+		}
+	})
+	progressStopped := false
+	stopProgress := func() {
+		if progressStopped {
+			return
+		}
+		close(progressDone)
+		progressWorkers.Wait()
+		progressStopped = true
+	}
+	defer stopProgress()
 	captureIdentity := func(entryIndex int, info os.FileInfo) {
 		if setLocalChangeID(&manifest.Files[entryIndex], info) {
 			identitiesRecorded++
@@ -1704,6 +1729,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 				return stagingPathError("create symlink", entry.Path, err)
 			}
 		case "file":
+			progressFilesStarted.Add(1)
 			matches, info, err := fileMatchesManifestChunksWithInfo(ctx, dst, entry)
 			if err == nil && matches {
 				if fileHasMultipleLinks(info) {
@@ -1727,6 +1753,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			if err == nil && matches {
 				captureIdentity(entryIndex, info)
 				stagedFilesReused++
+				progressFilesCompleted.Add(1)
 				continue
 			}
 			if ctx.Err() != nil {
@@ -1758,6 +1785,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 								sourceFilesCopied++
 								baselineCopyBytes += copied
 							}
+							progressFilesCompleted.Add(1)
 							continue
 						}
 						if ctx.Err() != nil {
@@ -1837,6 +1865,8 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 					_ = out.Close()
 					return stagingPathError("write file data", entry.Path, err)
 				}
+				progressChunksWritten.Add(1)
+				progressPayloadBytes.Add(int64(len(data)))
 			}
 			if err := out.Chmod(os.FileMode(entry.Mode)); err != nil {
 				_ = out.Close()
@@ -1861,6 +1891,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 				captureIdentity(entryIndex, info)
 			}
 			filesRebuilt++
+			progressFilesCompleted.Add(1)
 		}
 	}
 	if err := os.RemoveAll(stageTempDir); err != nil {
@@ -1883,6 +1914,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	if err := os.Chmod(stage, os.FileMode(manifest.RootMode)); err != nil {
 		return fmt.Errorf("restore staging root permissions: %w", err)
 	}
+	stopProgress()
 	if identitiesRecorded == fileCount {
 		log.Info("Captured staging file identities: snapshot=%s files=%d", manifest.ID, identitiesRecorded)
 	} else {
