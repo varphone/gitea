@@ -564,16 +564,23 @@ func cachedChunkAvailable(cacheDir, hash string, size int64) bool {
 
 func readCachedChunk(cacheDir, hash string) ([]byte, error) {
 	path := cachePath(cacheDir, hash)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > chunkMaxSize {
+		return nil, errors.New("cached chunk is not a regular file within the size limit")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
+	openedInfo, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > chunkMaxSize {
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) || openedInfo.Size() > chunkMaxSize {
 		return nil, errors.New("cached chunk is not a regular file within the size limit")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, chunkMaxSize+1))
