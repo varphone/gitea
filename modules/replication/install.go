@@ -117,6 +117,8 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 	}
 	log.Info("Stopped standby service for snapshot installation: snapshot=%s duration=%s", snapshot.ID, time.Since(stopStarted))
 	activated := false
+	var executable string
+	keysRegenerated := false
 	rollback := func(cause error) error {
 		log.Warn("Rolling back standby snapshot installation: snapshot=%s activated=%t cause=%v", snapshot.ID, activated, cause)
 		var rollbackErrors []error
@@ -166,9 +168,26 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("preserve failed restore: %w", stageErr))
 			}
 		}
+		keysRestored := true
+		if previousRootActive && keysRegenerated {
+			keysStarted := time.Now()
+			keysCtx, keysCancel := context.WithTimeout(context.Background(), cfg.ServiceTimeout)
+			keysErr := regenerateKeys(keysCtx, executable, setting.CustomConf)
+			keysCancel()
+			if keysErr != nil {
+				keysRestored = false
+				log.Error("Restore previous standby authorized keys failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(keysStarted), keysErr)
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore previous authorized_keys: %w", keysErr))
+			} else {
+				keysRegenerated = false
+				log.Info("Restored previous standby authorized keys: snapshot=%s duration=%s", snapshot.ID, time.Since(keysStarted))
+			}
+		}
 		if wasActive {
 			if !previousRootActive {
 				log.Error("Previous standby service remains stopped because its data root is unverified: snapshot=%s", snapshot.ID)
+			} else if !keysRestored {
+				log.Error("Previous standby service remains stopped because its authorized keys were not restored: snapshot=%s", snapshot.ID)
 			} else {
 				restartStarted := time.Now()
 				if err := systemctlWithTimeout(cfg.ServiceTimeout, "start", cfg.GiteaServiceName); err != nil {
@@ -227,7 +246,7 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 		log.Debug("Preserved local standby configuration: snapshot=%s", snapshot.ID)
 	}
 
-	executable, err := executablePath()
+	executable, err = executablePath()
 	if err != nil {
 		return rollback(fmt.Errorf("locate gitea executable: %w", err))
 	}
@@ -236,6 +255,7 @@ func installPreparedSnapshot(ctx context.Context, stage string, snapshot *Snapsh
 		log.Error("Regenerate standby authorized keys failed: snapshot=%s duration=%s error=%v", snapshot.ID, time.Since(keysStarted), err)
 		return rollback(fmt.Errorf("regenerate authorized_keys: %w", err))
 	}
+	keysRegenerated = true
 	log.Info("Regenerated standby authorized keys: snapshot=%s duration=%s", snapshot.ID, time.Since(keysStarted))
 	startStarted := time.Now()
 	if err := systemctl(taskCtx, "start", cfg.GiteaServiceName); err != nil {
