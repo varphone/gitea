@@ -1504,13 +1504,6 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 }
 
 func writeManifestAt(path string, manifest *SnapshotManifest) error {
-	data, err := json.Marshal(manifest)
-	if err != nil {
-		return err
-	}
-	if len(data) > maxManifestSize {
-		return errors.New("incremental manifest exceeds maximum size")
-	}
 	dir := filepath.Dir(path)
 	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -1522,10 +1515,12 @@ func writeManifestAt(path string, manifest *SnapshotManifest) error {
 		_ = file.Close()
 		return err
 	}
-	_, writeErr := file.Write(data)
+	if err := writeManifestJSON(file, manifest, false); err != nil {
+		return errors.Join(err, file.Close())
+	}
 	syncErr := file.Sync()
 	closeErr := file.Close()
-	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+	if err := errors.Join(syncErr, closeErr); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {

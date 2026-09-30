@@ -33,10 +33,12 @@ const (
 	chunkMaxSize             = 4 << 20
 	maxManifestSymlinkDepth  = 40
 	maxManifestSize          = 256 << 20
+	manifestEncodeBatchSize  = 1 << 20
 )
 
 var (
 	errManifestTrailingData   = errors.New("incremental manifest contains oversized or trailing data")
+	errManifestTooLarge       = errors.New("incremental manifest exceeds maximum size")
 	errIncrementalTreeChanged = errors.New("filesystem tree changed during scan")
 )
 
@@ -506,19 +508,112 @@ func sameChunks(a, b []ChunkDescriptor) bool {
 	return true
 }
 
-func manifestDigest(manifest *SnapshotManifest) (string, error) {
+type manifestSizeWriter struct {
+	writer io.Writer
+	size   int64
+}
+
+func (w *manifestSizeWriter) Write(data []byte) (int, error) {
+	if int64(len(data)) > int64(maxManifestSize)-w.size {
+		return 0, errManifestTooLarge
+	}
+	n, err := w.writer.Write(data)
+	w.size += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	return n, err
+}
+
+func treeEntryEncodedSizeLowerBound(entry *TreeEntry) int64 {
+	size := int64(30 + len(entry.Path) + len(entry.Type) + len(entry.ChangeID) + len(entry.LinkTarget))
+	for _, chunk := range entry.Chunks {
+		chunkSize := int64(32 + len(chunk.Hash))
+		if chunkSize > int64(maxManifestSize)-size {
+			return int64(maxManifestSize) + 1
+		}
+		size += chunkSize
+	}
+	if len(entry.Chunks) > 0 {
+		size += 11
+	}
+	return size
+}
+
+func writeManifestJSON(writer io.Writer, manifest *SnapshotManifest, clearDigest bool) error {
 	manifestCopy := *manifest
-	manifestCopy.SHA256 = ""
-	manifestCopy.Signature = ""
-	data, err := json.Marshal(&manifestCopy)
+	if clearDigest {
+		manifestCopy.SHA256 = ""
+		manifestCopy.Signature = ""
+	}
+	// Files is the final manifest field, so it can be encoded in bounded batches.
+	files := manifestCopy.Files
+	manifestCopy.Files = nil
+	header, err := json.Marshal(&manifestCopy)
 	if err != nil {
+		return err
+	}
+	sizedWriter := &manifestSizeWriter{writer: writer}
+	if len(files) == 0 {
+		_, err := sizedWriter.Write(header)
+		return err
+	}
+	if len(header) == 0 || header[len(header)-1] != '}' {
+		return errors.New("invalid encoded incremental manifest header")
+	}
+	if _, err := sizedWriter.Write(header[:len(header)-1]); err != nil {
+		return err
+	}
+	if _, err := sizedWriter.Write([]byte(`,"files":[`)); err != nil {
+		return err
+	}
+	for start := 0; start < len(files); {
+		end := start
+		minimumSize := int64(0)
+		for end < len(files) {
+			entrySize := treeEntryEncodedSizeLowerBound(&files[end])
+			if end > 0 {
+				entrySize++
+			}
+			if entrySize+2 > int64(maxManifestSize)-sizedWriter.size-minimumSize {
+				return errManifestTooLarge
+			}
+			if end > start && minimumSize+entrySize > manifestEncodeBatchSize {
+				break
+			}
+			minimumSize += entrySize
+			end++
+		}
+		if end == start {
+			end++
+		}
+		if start > 0 {
+			if _, err := sizedWriter.Write([]byte{','}); err != nil {
+				return err
+			}
+		}
+		batch, err := json.Marshal(files[start:end])
+		if err != nil {
+			return err
+		}
+		if len(batch) < 2 {
+			return errors.New("invalid encoded incremental manifest entries")
+		}
+		if _, err := sizedWriter.Write(batch[1 : len(batch)-1]); err != nil {
+			return err
+		}
+		start = end
+	}
+	_, err = sizedWriter.Write([]byte(`]}`))
+	return err
+}
+
+func manifestDigest(manifest *SnapshotManifest) (string, error) {
+	h := sha256.New()
+	if err := writeManifestJSON(h, manifest, true); err != nil {
 		return "", err
 	}
-	if len(data) > maxManifestSize {
-		return "", errors.New("incremental manifest exceeds maximum size")
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func signIncrementalManifest(manifest *SnapshotManifest, token string) error {
