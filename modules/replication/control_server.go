@@ -588,11 +588,11 @@ func (s *controlServer) setTaskManifest(ctx context.Context, manifest *SnapshotM
 		s.mu.RUnlock()
 		var err error
 		if baseManifestID != "" && hasBaseIndex {
-			index, err = indexManifestDeltaContext(ctx, &manifestCopy, baseIndex)
+			index, alternates, err = indexManifestDeltaContext(ctx, &manifestCopy, baseIndex)
 			indexFallbackID = baseManifestID
 			indexKind = "delta"
 		} else {
-			index, err = indexManifestContext(ctx, &manifestCopy)
+			index, alternates, err = indexManifestWithAlternatesContext(ctx, &manifestCopy)
 		}
 		if err != nil {
 			return fmt.Errorf("index transferring manifest %s: %w", manifest.ID, err)
@@ -627,7 +627,7 @@ func (s *controlServer) setTaskManifest(ctx context.Context, manifest *SnapshotM
 		delete(s.taskChunkIndexes, manifest.ID)
 		delete(s.taskChunkIndexFallbacks, manifest.ID)
 	}
-	if manifestCopy.State == "preflight" {
+	if manifestCopy.State == "preflight" || manifestCopy.State == "transferring" {
 		if s.taskChunkAlternates == nil {
 			s.taskChunkAlternates = map[string]map[string][]chunkLocation{}
 		}

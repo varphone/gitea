@@ -930,27 +930,29 @@ func indexManifestContext(ctx context.Context, m *SnapshotManifest) (map[string]
 	return index, nil
 }
 
-func indexManifestDeltaContext(ctx context.Context, manifest *SnapshotManifest, base map[string]chunkLocation) (map[string]chunkLocation, error) {
+func indexManifestDeltaContext(ctx context.Context, manifest *SnapshotManifest, base map[string]chunkLocation) (map[string]chunkLocation, map[string][]chunkLocation, error) {
 	delta := make(map[string]chunkLocation)
+	alternates := make(map[string][]chunkLocation)
 	for _, entry := range manifest.Files {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, chunk := range entry.Chunks {
 			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			if _, seen := delta[chunk.Hash]; seen {
-				continue
+				return nil, nil, err
 			}
 			candidate := chunkLocation{entry.Path, chunk.Offset, chunk.Size}
+			if primary, seen := delta[chunk.Hash]; seen {
+				addChunkAlternate(alternates, chunk.Hash, primary, candidate)
+				continue
+			}
 			if baseLocation, ok := base[chunk.Hash]; ok && baseLocation == candidate {
 				continue
 			}
 			delta[chunk.Hash] = candidate
 		}
 	}
-	return delta, nil
+	return delta, alternates, nil
 }
 
 func indexManifestWithAlternatesContext(ctx context.Context, m *SnapshotManifest) (map[string]chunkLocation, map[string][]chunkLocation, error) {
