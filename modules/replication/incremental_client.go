@@ -1326,6 +1326,7 @@ func pruneUnexpectedStageEntries(ctx context.Context, stage string, manifest *Sn
 }
 
 func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, manifest, previous *SnapshotManifest, fetch func(string) ([]byte, error)) error {
+	stageStarted := time.Now()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1340,6 +1341,9 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 		return err
 	}
 	fileCount, identitiesRecorded := 0, 0
+	stagedFilesReused, sourceFilesLinked, filesRebuilt := 0, 0, 0
+	cacheChunks, localChunks, fetchedChunks := 0, 0, 0
+	var cacheBytes, localBytes, fetchedBytes int64
 	for i := range manifest.Files {
 		manifest.Files[i].LocalChangeID = ""
 		if manifest.Files[i].Type == "file" {
@@ -1447,6 +1451,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			matches, info, err := fileMatchesManifestChunksWithInfo(ctx, dst, entry)
 			if err == nil && matches {
 				captureIdentity(entryIndex, info)
+				stagedFilesReused++
 				continue
 			}
 			if ctx.Err() != nil {
@@ -1473,6 +1478,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 							linkedInfo, statErr := os.Lstat(dst)
 							if statErr == nil && linkedInfo.Mode().IsRegular() && os.SameFile(sourceInfo, linkedInfo) {
 								captureIdentity(entryIndex, linkedInfo)
+								sourceFilesLinked++
 								continue
 							}
 							if removeErr := os.Remove(dst); removeErr != nil && !os.IsNotExist(removeErr) {
@@ -1499,8 +1505,12 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			}
 			for _, chunk := range entry.Chunks {
 				var data []byte
+				chunkSource := ""
 				if cached, err := readCachedChunk(cacheDir, chunk.Hash); err == nil {
 					data = cached
+					if data != nil {
+						chunkSource = "cache"
+					}
 				} else if location, ok := oldChunks[chunk.Hash]; ok {
 					data, err = readChunkFromRoot(root, resolvedRoot, location, chunk.Hash)
 					if err != nil {
@@ -1515,11 +1525,15 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 							data = nil
 						}
 					}
+					if err == nil && data != nil {
+						chunkSource = "local"
+					}
 				}
 				if data == nil {
 					data, err = fetch(chunk.Hash)
 					if err == nil {
 						err = storeChunk(cacheDir, chunk.Hash, data)
+						chunkSource = "remote"
 					}
 					if err != nil {
 						_ = out.Close()
@@ -1529,6 +1543,17 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 				if int64(len(data)) != chunk.Size {
 					_ = out.Close()
 					return fmt.Errorf("staging file %q chunk %s size mismatch: got %d want %d", entry.Path, chunk.Hash, len(data), chunk.Size)
+				}
+				switch chunkSource {
+				case "cache":
+					cacheChunks++
+					cacheBytes += int64(len(data))
+				case "local":
+					localChunks++
+					localBytes += int64(len(data))
+				case "remote":
+					fetchedChunks++
+					fetchedBytes += int64(len(data))
 				}
 				if _, err := out.Write(data); err != nil {
 					_ = out.Close()
@@ -1557,6 +1582,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 			if info, err := os.Lstat(dst); err == nil {
 				captureIdentity(entryIndex, info)
 			}
+			filesRebuilt++
 		}
 	}
 	if err := os.RemoveAll(stageTempDir); err != nil {
@@ -1584,6 +1610,7 @@ func buildIncrementalStage(ctx context.Context, root, stage, cacheDir string, ma
 	} else {
 		log.Warn("Could not capture all staging file identities: snapshot=%s recorded=%d total=%d", manifest.ID, identitiesRecorded, fileCount)
 	}
+	log.Info("Built incremental staging tree: snapshot=%s files_reused=%d files_hardlinked=%d files_rebuilt=%d chunks_cached=%d cached_bytes=%d chunks_local=%d local_bytes=%d chunks_fetched=%d fetched_bytes=%d duration=%s", manifest.ID, stagedFilesReused, sourceFilesLinked, filesRebuilt, cacheChunks, cacheBytes, localChunks, localBytes, fetchedChunks, fetchedBytes, time.Since(stageStarted))
 	return nil
 }
 
