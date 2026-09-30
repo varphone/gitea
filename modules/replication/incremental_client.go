@@ -1162,8 +1162,9 @@ func fetchPreflightChunksConcurrently(ctx context.Context, client *http.Client, 
 							processed := int64(cached) + fetched.Load() + count
 							log.Warn("Preflight progress for snapshot %s remains unstable: processed=%d/%d fetched=%d cached=%d deferred=%d", id, processed, total, fetched.Load(), cached, count)
 						}
-						if fetched.Load() == 0 && count >= chunkChangeStopStride && stopAfterChurn.CompareAndSwap(false, true) {
-							log.Warn("Preflight prefetch for snapshot %s stopped scheduling after %d changed chunks before any successful fetch", id, count)
+						fetchedCount := fetched.Load()
+						if count >= chunkChangeStopStride && count > fetchedCount+int64(workerCount) && stopAfterChurn.CompareAndSwap(false, true) {
+							log.Warn("Preflight prefetch for snapshot %s stopped scheduling after changed chunks exceeded successful fetches: changed=%d fetched=%d", id, count, fetchedCount)
 							cancel()
 						}
 						continue
