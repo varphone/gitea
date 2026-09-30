@@ -91,7 +91,9 @@ func responseRetryDelay(resp *http.Response, fallback time.Duration) time.Durati
 }
 
 func shouldRetryHTTPStatus(status int) bool {
-	return status == http.StatusInternalServerError || status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+	return status == http.StatusRequestTimeout || status == http.StatusInternalServerError ||
+		status == http.StatusTooManyRequests || status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
 
 type cancelRequestBody struct {
