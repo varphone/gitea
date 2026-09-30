@@ -715,16 +715,27 @@ func storeChunk(cacheDir, hash string, data []byte) error {
 }
 
 func openManifestFile(path string) (*os.File, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("incremental manifest is not a regular file")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	info, err := file.Stat()
+	openedInfo, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
 		return nil, err
 	}
-	if info.Size() > int64(maxManifestSize) {
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		_ = file.Close()
+		return nil, errors.New("incremental manifest changed while opening")
+	}
+	if openedInfo.Size() > int64(maxManifestSize) {
 		_ = file.Close()
 		return nil, errors.New("incremental manifest exceeds maximum size")
 	}
