@@ -25,6 +25,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/optional"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	repo_module "gitea.dev/modules/repository"
 	"gitea.dev/modules/reqctx"
 	"gitea.dev/modules/timeutil"
@@ -678,12 +679,14 @@ func addRepoToBranchSyncQueue(repoID int64) error {
 	})
 }
 
-func initBranchSyncQueue(ctx context.Context) error {
-	branchSyncQueue = queue.CreateUniqueQueue(ctx, "branch_sync", handlerBranchSync)
+func initBranchSyncQueue(ctx context.Context, runWorker bool) error {
+	branchSyncQueue = queue.CreateUniqueQueue(ctx, "branch_sync", replication.GuardPrimaryRecoveryHandler(ctx, handlerBranchSync))
 	if branchSyncQueue == nil {
 		return errors.New("unable to create branch_sync queue")
 	}
-	go graceful.GetManager().RunWithCancel(branchSyncQueue)
+	if runWorker {
+		go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(branchSyncQueue))
+	}
 
 	return nil
 }

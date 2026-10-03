@@ -17,6 +17,8 @@ import (
 
 	"gitea.dev/models/db"
 	"gitea.dev/modules/container"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/timeutil"
 	"gitea.dev/modules/util"
@@ -92,6 +94,11 @@ func BuiltinApplications() map[string]*BuiltinOAuth2Application {
 }
 
 func Init(ctx context.Context) error {
+	if replication.IsWriteProtected() {
+		log.Info("Skipping built-in OAuth2 application reconciliation while replication write protection is active")
+		return nil
+	}
+
 	builtinApps := BuiltinApplications()
 	var builtinAllClientIDs []string
 	for clientID := range builtinApps {

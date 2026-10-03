@@ -13,6 +13,7 @@ import (
 	user_model "gitea.dev/models/user"
 	"gitea.dev/modules/auth/httpauth"
 	"gitea.dev/modules/log"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/timeutil"
 	"gitea.dev/modules/util"
@@ -96,9 +97,11 @@ func (b *Basic) VerifyAuthToken(req *http.Request, w http.ResponseWriter, store 
 			return nil, err
 		}
 
-		token.UpdatedUnix = timeutil.TimeStampNow()
-		if err = auth_model.UpdateAccessToken(req.Context(), token); err != nil {
-			log.Error("UpdateAccessToken:  %v", err)
+		if !replication.IsWriteProtected() {
+			token.UpdatedUnix = timeutil.TimeStampNow()
+			if err = auth_model.UpdateAccessToken(req.Context(), token); err != nil {
+				log.Error("UpdateAccessToken:  %v", err)
+			}
 		}
 
 		store.GetData()["LoginMethod"] = AccessTokenMethodName
@@ -176,6 +179,9 @@ func validateTOTP(req *http.Request, u *user_model.User) error {
 			return nil
 		}
 		return err
+	}
+	if replication.IsWriteProtected() {
+		return ErrUserAuthMessage("two-factor authentication is unavailable while writes are disabled")
 	}
 	// Consume the passcode atomically so a captured OTP cannot be replayed within its validity window.
 	if ok, err := twofa.ValidateAndConsumeTOTP(req.Context(), req.Header.Get("X-Gitea-OTP")); err != nil {

@@ -10,6 +10,7 @@ import (
 	"gitea.dev/modules/graceful"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 )
 
@@ -28,12 +29,15 @@ func handler(items ...int64) []int64 {
 	return nil
 }
 
-func initStatsQueue() error {
-	statsQueue = queue.CreateUniqueQueue(graceful.GetManager().ShutdownContext(), "repo_stats_update", handler)
+func initStatsQueue(runWorker bool) error {
+	ctx := graceful.GetManager().ShutdownContext()
+	statsQueue = queue.CreateUniqueQueue(ctx, "repo_stats_update", replication.GuardPrimaryRecoveryHandler(ctx, handler))
 	if statsQueue == nil {
 		return errors.New("unable to create repo_stats_update queue")
 	}
-	go graceful.GetManager().RunWithCancel(statsQueue)
+	if runWorker {
+		go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(statsQueue))
+	}
 	return nil
 }
 

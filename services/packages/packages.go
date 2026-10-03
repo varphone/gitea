@@ -22,6 +22,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/optional"
 	packages_module "gitea.dev/modules/packages"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/storage"
 	notify_service "gitea.dev/services/notify"
@@ -610,7 +611,7 @@ func OpenBlobStream(pb *packages_model.PackageBlob) (io.ReadSeekCloser, error) {
 	return cs.OpenBlob(key)
 }
 
-// OpenBlobForDownload returns the content of the specific package blob and increases the download counter.
+// OpenBlobForDownload returns the blob and tracks downloads on writable nodes.
 // If the storage supports direct serving and it's enabled, only the direct serving url is returned.
 func OpenBlobForDownload(ctx context.Context, pf *packages_model.PackageFile, pb *packages_model.PackageBlob, method string, serveDirectReqParams *storage.ServeDirectOptions) (io.ReadSeekCloser, *url.URL, *packages_model.PackageFile, error) {
 	key := packages_module.BlobHash256Key(pb.HashSHA256)
@@ -634,7 +635,7 @@ func OpenBlobForDownload(ctx context.Context, pf *packages_model.PackageFile, pb
 		return nil, nil, nil, err
 	}
 
-	if pf.IsLead && method == http.MethodGet {
+	if pf.IsLead && method == http.MethodGet && !replication.IsWriteProtected() {
 		if err := packages_model.IncrementDownloadCounter(ctx, pf.VersionID); err != nil {
 			log.Error("Error incrementing download counter: %v", err)
 		}

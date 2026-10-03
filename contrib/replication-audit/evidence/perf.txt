@@ -1,0 +1,41 @@
+=== RUN   TestAuditScanPerf
+2026/10/03 19:12:59 .../replication/incremental.go:1102:scanIncrementalTreeWithProgressForTaskAndDigest() [I] Replication tree scan completed: snapshot=local entries_seen=10000 files_seen=10000 files_completed=10000 reused_files=0 chunked_files=10000 logical_file_bytes=130000 content_bytes_chunked=130000 verify_all=true duration=87.216305ms
+    replication_audit_probe_test.go:87: phase=first elapsed=87.373212ms files=10000 size=130000
+    replication_audit_probe_test.go:96: phase=first manifest_json_bytes=2540137 manifest_gzip_bytes=462794
+    replication_audit_probe_test.go:87: phase=unchanged elapsed=37.622554ms files=10000 size=130000
+2026/10/03 19:12:59 .../replication/incremental.go:1102:scanIncrementalTreeWithProgressForTaskAndDigest() [I] Replication tree scan completed: snapshot=local entries_seen=10000 files_seen=10000 files_completed=10000 reused_files=10000 chunked_files=0 logical_file_bytes=130000 content_bytes_chunked=0 verify_all=false duration=37.558849ms
+    replication_audit_probe_test.go:96: phase=unchanged manifest_json_bytes=2540137 manifest_gzip_bytes=462794
+2026/10/03 19:12:59 .../replication/incremental.go:1102:scanIncrementalTreeWithProgressForTaskAndDigest() [I] Replication tree scan completed: snapshot=local entries_seen=10000 files_seen=10000 files_completed=10000 reused_files=9900 chunked_files=100 logical_file_bytes=129400 content_bytes_chunked=700 verify_all=false duration=36.405546ms
+    replication_audit_probe_test.go:87: phase=one-percent elapsed=36.44874ms files=10000 size=129400
+    replication_audit_probe_test.go:96: phase=one-percent manifest_json_bytes=2540037 manifest_gzip_bytes=459696
+    replication_audit_probe_test.go:87: phase=rename-delete elapsed=35.499324ms files=9999 size=129387
+2026/10/03 19:12:59 .../replication/incremental.go:1102:scanIncrementalTreeWithProgressForTaskAndDigest() [I] Replication tree scan completed: snapshot=local entries_seen=9999 files_seen=9999 files_completed=9999 reused_files=9998 chunked_files=1 logical_file_bytes=129387 content_bytes_chunked=13 verify_all=false duration=35.444677ms
+    replication_audit_probe_test.go:96: phase=rename-delete manifest_json_bytes=2539785 manifest_gzip_bytes=459835
+    replication_audit_probe_test.go:152: kind=compressible elapsed=504.366684ms logical=268435456 chunks=64 zero=0 encoded_all_chunks=270720
+    replication_audit_probe_test.go:152: kind=random elapsed=556.80236ms logical=268435456 chunks=198 zero=0 encoded_all_chunks=268435456
+    replication_audit_probe_test.go:152: kind=sparse elapsed=304.71982ms logical=268435456 chunks=64 zero=268435456 encoded_all_chunks=0
+--- PASS: TestAuditScanPerf (2.02s)
+PASS
+	Command being timed: "/tmp/gitea-replication-audit-gxrewrmd/audit.test -test.run ^TestAuditScanPerf$ -test.v"
+	User time (seconds): 1.68
+	System time (seconds): 0.56
+	Percent of CPU this job got: 110%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:02.02
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 45268
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 57059
+	Voluntary context switches: 5328
+	Involuntary context switches: 115
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 1129384
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

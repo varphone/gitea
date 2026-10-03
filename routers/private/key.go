@@ -8,12 +8,17 @@ import (
 
 	asymkey_model "gitea.dev/models/asymkey"
 	"gitea.dev/modules/private"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/timeutil"
 	"gitea.dev/services/context"
 )
 
 // UpdatePublicKeyInRepo update public key and deploy key updates
 func UpdatePublicKeyInRepo(ctx *context.PrivateContext) {
+	if replication.IsWriteProtected() {
+		ctx.PlainText(http.StatusOK, "success")
+		return
+	}
 	keyID := ctx.PathParamInt64("id")
 	repoID := ctx.PathParamInt64("repoid")
 	if err := asymkey_model.UpdatePublicKeyUpdated(ctx, keyID); err != nil {

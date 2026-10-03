@@ -13,6 +13,7 @@ import (
 	auth_module "gitea.dev/modules/auth"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/optional"
+	"gitea.dev/modules/replication"
 	asymkey_service "gitea.dev/services/asymkey"
 	source_service "gitea.dev/services/auth/source"
 	user_service "gitea.dev/services/user"
@@ -41,6 +42,12 @@ func (source *Source) Authenticate(ctx context.Context, user *user_model.User, u
 	}
 	if sr.Mail == "" {
 		sr.Mail = sr.Username + "@localhost.local"
+	}
+	if replication.IsWriteProtected() {
+		if user == nil {
+			return nil, user_model.ErrUserNotExist{Name: loginName}
+		}
+		return user, nil
 	}
 	isAttributeSSHPublicKeySet := strings.TrimSpace(source.AttributeSSHPublicKey) != ""
 

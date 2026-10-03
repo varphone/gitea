@@ -18,6 +18,7 @@ import (
 	"gitea.dev/modules/graceful"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/process"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/translation"
 
@@ -80,6 +81,24 @@ func getCronTaskLockKey(name string) string {
 
 // RunWithUser will run the task incrementing the cron counter at the time with User
 func (t *Task) RunWithUser(doer *user_model.User, config Config) {
+	// Cron tasks bypass HTTP middleware, so honor the same replication write fence here.
+	if replication.IsWriteProtected() {
+		if replication.IsReplicaReadOnly() {
+			log.Debug("Skipping cron task while replication write protection remains active: task=%s", t.Name)
+			return
+		}
+		ctx := graceful.GetManager().ShutdownContext()
+		if err := replication.WaitForPrimaryRecovery(ctx); err != nil {
+			if ctx.Err() == nil {
+				log.Error("Cannot wait for primary recovery before cron task: task=%s error=%v", t.Name, err)
+			}
+			return
+		}
+		if replication.IsWriteProtected() {
+			log.Debug("Skipping cron task while replication write protection remains active: task=%s", t.Name)
+			return
+		}
+	}
 	locked, releaser, err := globallock.TryLock(graceful.GetManager().ShutdownContext(), getCronTaskLockKey(t.Name))
 	if err != nil {
 		log.Error("Failed to acquire lock for cron task %q: %v", t.Name, err)

@@ -23,6 +23,7 @@ import (
 	issue_indexer "gitea.dev/modules/indexer/issues"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	repo_module "gitea.dev/modules/repository"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/structs"
@@ -97,19 +98,23 @@ func PushCreateRepo(ctx context.Context, authUser, owner *user_model.User, repoN
 
 // Init start repository service
 func Init(ctx context.Context) error {
-	licenseUpdaterQueue = queue.CreateUniqueQueue(graceful.GetManager().ShutdownContext(), "repo_license_updater", repoLicenseUpdater)
+	runWorkers := !replication.IsReplicaReadOnly()
+	queueCtx := graceful.GetManager().ShutdownContext()
+	licenseUpdaterQueue = queue.CreateUniqueQueue(queueCtx, "repo_license_updater", replication.GuardPrimaryRecoveryHandler(queueCtx, repoLicenseUpdater))
 	if licenseUpdaterQueue == nil {
 		return errors.New("unable to create repo_license_updater queue")
 	}
-	go graceful.GetManager().RunWithCancel(licenseUpdaterQueue)
+	if runWorkers {
+		go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(licenseUpdaterQueue))
+	}
 
 	if err := repo_module.LoadRepoConfig(); err != nil {
 		return err
 	}
-	if err := initPushQueue(); err != nil {
+	if err := initPushQueue(runWorkers); err != nil {
 		return err
 	}
-	return initBranchSyncQueue(graceful.GetManager().ShutdownContext())
+	return initBranchSyncQueue(graceful.GetManager().ShutdownContext(), runWorkers)
 }
 
 // UpdateRepository updates a repository

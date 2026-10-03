@@ -15,6 +15,7 @@ import (
 	"gitea.dev/modules/graceful"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	notify_service "gitea.dev/services/notify"
 )
 
@@ -43,7 +44,8 @@ var _ notify_service.Notifier = &notificationService{}
 // NewNotifier create a new notificationService notifier
 func NewNotifier() notify_service.Notifier {
 	ns := &notificationService{}
-	ns.issueQueue = queue.CreateSimpleQueue(graceful.GetManager().ShutdownContext(), "notification-service", handler)
+	queueCtx := graceful.GetManager().ShutdownContext()
+	ns.issueQueue = queue.CreateSimpleQueue(queueCtx, "notification-service", replication.GuardPrimaryRecoveryHandler(queueCtx, handler))
 	if ns.issueQueue == nil {
 		log.Fatal("Unable to create notification-service queue")
 	}
@@ -60,7 +62,10 @@ func handler(items ...issueNotificationOpts) []issueNotificationOpts {
 }
 
 func (ns *notificationService) Run() {
-	go graceful.GetManager().RunWithCancel(ns.issueQueue) // TODO: using "go" here doesn't seem right, just leave it as old code
+	if replication.IsReplicaReadOnly() {
+		return
+	}
+	go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(ns.issueQueue)) // TODO: using "go" here doesn't seem right, just leave it as old code
 }
 
 func (ns *notificationService) CreateIssueComment(ctx context.Context, doer *user_model.User, repo *repo_model.Repository,

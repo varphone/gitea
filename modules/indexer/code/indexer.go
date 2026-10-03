@@ -21,6 +21,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/process"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/util"
 )
@@ -93,6 +94,7 @@ func index(ctx context.Context, indexer internal.Indexer, repoID int64) error {
 
 // Init initialize the repo indexer
 func Init() {
+	readOnlyReplica := replication.IsReplicaReadOnly()
 	if !setting.Indexer.RepoIndexerEnabled {
 		(*globalIndexer.Load()).Close()
 		return
@@ -131,7 +133,7 @@ func Init() {
 			return nil // do not re-queue the failed items, otherwise some broken repo will block the queue
 		}
 
-		indexerQueue = queue.CreateUniqueQueue(ctx, "code_indexer", handler)
+		indexerQueue = queue.CreateUniqueQueue(ctx, "code_indexer", replication.GuardPrimaryRecoveryHandler(ctx, handler))
 		if indexerQueue == nil {
 			log.Fatal("Unable to create codes indexer queue")
 		}
@@ -191,11 +193,21 @@ func Init() {
 
 		globalIndexer.Store(&rIndexer)
 
-		// Start processing the queue
-		go graceful.GetManager().RunWithCancel(indexerQueue)
+		runWorkers := !readOnlyReplica || setting.Indexer.RepoType == "bleve"
+		if !runWorkers {
+			log.Info("Replication replica mode is active; shared code index updates are paused")
+		} else {
+			// Start processing the queue
+			go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(indexerQueue))
 
-		if !existed { // populate the index because it's created for the first time
-			go graceful.GetManager().RunWithShutdownContext(populateRepoIndexer)
+			if !existed { // populate the index because it's created for the first time
+				go graceful.GetManager().RunWithShutdownContext(func(ctx context.Context) {
+					if err := replication.WaitForPrimaryRecovery(ctx); err != nil {
+						return
+					}
+					populateRepoIndexer(ctx)
+				})
+			}
 		}
 		select {
 		case waitChannel <- time.Since(start):

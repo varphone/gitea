@@ -16,6 +16,7 @@ import (
 	user_model "gitea.dev/models/user"
 	"gitea.dev/modules/auth/httpauth"
 	"gitea.dev/modules/log"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/timeutil"
 	"gitea.dev/modules/util"
@@ -138,9 +139,11 @@ func (o *OAuth2) userFromToken(ctx context.Context, tokenSHA string, store DataS
 		return nil, err
 	}
 
-	t.UpdatedUnix = timeutil.TimeStampNow()
-	if err = auth_model.UpdateAccessToken(ctx, t); err != nil {
-		log.Error("UpdateAccessToken: %v", err)
+	if !replication.IsWriteProtected() {
+		t.UpdatedUnix = timeutil.TimeStampNow()
+		if err = auth_model.UpdateAccessToken(ctx, t); err != nil {
+			log.Error("UpdateAccessToken: %v", err)
+		}
 	}
 	store.GetData()["IsApiToken"] = true
 	store.GetData()["ApiTokenScope"] = t.Scope

@@ -20,6 +20,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/process"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	repo_module "gitea.dev/modules/repository"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/timeutil"
@@ -32,12 +33,15 @@ import (
 // pushQueue represents a queue to handle update pull request tests
 var pushQueue *queue.WorkerPoolQueue[[]*repo_module.PushUpdateOptions]
 
-func initPushQueue() error {
-	pushQueue = queue.CreateSimpleQueue(graceful.GetManager().ShutdownContext(), "push_update", pushQueueHandler)
+func initPushQueue(runWorker bool) error {
+	queueCtx := graceful.GetManager().ShutdownContext()
+	pushQueue = queue.CreateSimpleQueue(queueCtx, "push_update", replication.GuardPrimaryRecoveryHandler(queueCtx, pushQueueHandler))
 	if pushQueue == nil {
 		return errors.New("unable to create push_update queue")
 	}
-	go graceful.GetManager().RunWithCancel(pushQueue)
+	if runWorker {
+		go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(pushQueue))
+	}
 	return nil
 }
 

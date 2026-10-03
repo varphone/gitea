@@ -9,6 +9,7 @@ import (
 	user_model "gitea.dev/models/user"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/optional"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/util"
 	"gitea.dev/services/context"
@@ -42,7 +43,7 @@ func SetDiffViewStyle(ctx *context.Context) {
 	if ctx.IsSigned {
 		style = util.IfZero(style, ctx.Doer.DiffViewStyle)
 		style = util.Iif(style == gitdiff.DiffStyleSplit, gitdiff.DiffStyleSplit, gitdiff.DiffStyleUnified)
-		if style != ctx.Doer.DiffViewStyle {
+		if style != ctx.Doer.DiffViewStyle && !replication.IsWriteProtected() {
 			err := user_service.UpdateUser(ctx, ctx.Doer, &user_service.UpdateOptions{DiffViewStyle: optional.Some(style)})
 			if err != nil {
 				log.Error("UpdateUser DiffViewStyle: %v", err)
@@ -67,7 +68,7 @@ func SetWhitespaceBehavior(ctx *context.Context) {
 		if err == nil {
 			if whitespaceBehavior == "" {
 				whitespaceBehavior = userWhitespaceBehavior
-			} else if whitespaceBehavior != userWhitespaceBehavior {
+			} else if whitespaceBehavior != userWhitespaceBehavior && !replication.IsWriteProtected() {
 				_ = user_model.SetUserSetting(ctx, ctx.Doer.ID, user_model.SettingsKeyDiffWhitespaceBehavior, whitespaceBehavior)
 			}
 		} // else: we can ignore the error safely

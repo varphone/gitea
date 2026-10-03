@@ -6,7 +6,7 @@ package json
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json" //nolint:depguard // this package wraps it
+	jsonv1 "encoding/json" //nolint:depguard // this package wraps it
 	"io"
 )
 
@@ -34,6 +34,16 @@ var DefaultJSONHandler = getDefaultJSONHandler()
 // Marshal converts object as bytes
 func Marshal(v any) ([]byte, error) {
 	return DefaultJSONHandler.Marshal(v)
+}
+
+// MarshalV1 serializes values with encoding/json's stable v1 rules.
+func MarshalV1(v any) ([]byte, error) {
+	return jsonv1.Marshal(v)
+}
+
+// NewDecoderV1 returns a decoder with encoding/json's streaming v1 semantics.
+func NewDecoderV1(reader io.Reader) *jsonv1.Decoder {
+	return jsonv1.NewDecoder(reader)
 }
 
 // Unmarshal decodes object from bytes
@@ -72,7 +82,7 @@ func MarshalIndent(v any, prefix, indent string) ([]byte, error) {
 
 // Valid proxy to json.Valid
 func Valid(data []byte) bool {
-	return json.Valid(data)
+	return jsonv1.Valid(data)
 }
 
 // UnmarshalHandleDoubleEncode - due to a bug in xorm (see https://gitea.com/xorm/xorm/pulls/1957) - it's
@@ -84,7 +94,7 @@ func UnmarshalHandleDoubleEncode(bs []byte, v any) error {
 		// To be consistent, we should treat all empty inputs as success
 		return nil
 	}
-	err := json.Unmarshal(bs, v)
+	err := jsonv1.Unmarshal(bs, v)
 	if err != nil {
 		ok := true
 		rs := []byte{}
@@ -101,11 +111,11 @@ func UnmarshalHandleDoubleEncode(bs []byte, v any) error {
 			if len(rs) > 1 && rs[0] == 0xff && rs[1] == 0xfe {
 				rs = rs[2:]
 			}
-			err = json.Unmarshal(rs, v)
+			err = jsonv1.Unmarshal(rs, v)
 		}
 	}
 	if err != nil && len(bs) > 2 && bs[0] == 0xff && bs[1] == 0xfe {
-		err = json.Unmarshal(bs[2:], v)
+		err = jsonv1.Unmarshal(bs[2:], v)
 	}
 	return err
 }

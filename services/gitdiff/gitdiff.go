@@ -12,6 +12,7 @@ import (
 	"html"
 	"html/template"
 	"io"
+	"maps"
 	"net/url"
 	"path"
 	"sort"
@@ -1461,6 +1462,15 @@ func GetDiffShortStat(ctx context.Context, repoStorage gitrepo.Repository, gitRe
 // SyncUserSpecificDiff inserts user-specific data such as which files the user has already viewed on the given diff
 // Additionally, the database is updated asynchronously if files have changed since the last review
 func SyncUserSpecificDiff(ctx context.Context, userID int64, pull *issues_model.PullRequest, gitRepo *git.Repository, diff *Diff, opts *DiffOptions) (*pull_model.ReviewState, error) {
+	return userSpecificDiff(ctx, userID, pull, gitRepo, diff, opts, true)
+}
+
+// GetUserSpecificDiff calculates review flags for rendering without persisting newly detected changes.
+func GetUserSpecificDiff(ctx context.Context, userID int64, pull *issues_model.PullRequest, gitRepo *git.Repository, diff *Diff, opts *DiffOptions) (*pull_model.ReviewState, error) {
+	return userSpecificDiff(ctx, userID, pull, gitRepo, diff, opts, false)
+}
+
+func userSpecificDiff(ctx context.Context, userID int64, pull *issues_model.PullRequest, gitRepo *git.Repository, diff *Diff, opts *DiffOptions, persistChanges bool) (*pull_model.ReviewState, error) {
 	review, err := pull_model.GetNewestReviewState(ctx, userID, pull.ID)
 	if err != nil {
 		return nil, err
@@ -1515,6 +1525,13 @@ func SyncUserSpecificDiff(ctx context.Context, userID int64, pull *issues_model.
 	}
 
 	if len(filesChangedSinceLastDiff) > 0 {
+		if !persistChanges {
+			updatedFiles := make(map[string]pull_model.ViewedState, len(review.UpdatedFiles)+len(filesChangedSinceLastDiff))
+			maps.Copy(updatedFiles, review.UpdatedFiles)
+			maps.Copy(updatedFiles, filesChangedSinceLastDiff)
+			review.UpdatedFiles = updatedFiles
+			return review, nil
+		}
 		// Explicitly store files that have changed in the database, if any is present at all.
 		// This has the benefit that the "Has Changed" attribute will be present as long as the user does not explicitly mark this file as viewed, so it will even survive a page reload after marking another file as viewed.
 		updatedReview, err := pull_model.UpdateReviewState(ctx, review.UserID, review.PullID, review.CommitSHA, filesChangedSinceLastDiff)

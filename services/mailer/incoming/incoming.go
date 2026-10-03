@@ -14,6 +14,7 @@ import (
 
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/process"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/services/mailer/token"
 
@@ -23,12 +24,15 @@ import (
 )
 
 func Init(ctx context.Context) error {
-	if !setting.IncomingEmail.Enabled {
+	if !setting.IncomingEmail.Enabled || replication.IsReplicaReadOnly() {
 		return nil
 	}
 	go func() {
 		ctx, _, finished := process.GetManager().AddTypedContext(ctx, "Incoming Email", process.SystemProcessType, true)
 		defer finished()
+		if err := replication.WaitForPrimaryRecovery(ctx); err != nil {
+			return
+		}
 
 		// This background job processes incoming emails. It uses the IMAP IDLE command to get notified about incoming emails.
 		// The following loop restarts the processing logic after errors until ctx indicates to stop.
@@ -230,6 +234,9 @@ loop:
 				handler, ok := handlers[handlerType]
 				if !ok {
 					return fmt.Errorf("unexpected handler type: %v", handlerType)
+				}
+				if err := replication.WaitForPrimaryWritable(ctx); err != nil {
+					return fmt.Errorf("wait for primary recovery before processing incoming email: %w", err)
 				}
 
 				content := getContentFromMailReader(env)

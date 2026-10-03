@@ -13,6 +13,7 @@ import (
 	"gitea.dev/modules/graceful"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	repo_module "gitea.dev/modules/repository"
 
 	"xorm.io/builder"
@@ -42,11 +43,13 @@ func addRepoToTagSyncQueue(repoID int64) error {
 }
 
 func initTagSyncQueue(ctx context.Context) error {
-	tagSyncQueue = queue.CreateUniqueQueue(ctx, "tag_sync", handlerTagSync)
+	tagSyncQueue = queue.CreateUniqueQueue(ctx, "tag_sync", replication.GuardPrimaryRecoveryHandler(ctx, handlerTagSync))
 	if tagSyncQueue == nil {
 		return errors.New("unable to create tag_sync queue")
 	}
-	go graceful.GetManager().RunWithCancel(tagSyncQueue)
+	if !replication.IsReplicaReadOnly() {
+		go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(tagSyncQueue))
+	}
 
 	return nil
 }

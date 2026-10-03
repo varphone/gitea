@@ -15,6 +15,7 @@ import (
 	user_model "gitea.dev/models/user"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/optional"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/templates"
 	"gitea.dev/services/auth/source/sspi"
@@ -113,6 +114,9 @@ func (s *SSPI) Verify(req *http.Request, w http.ResponseWriter, store DataStore,
 			log.Error("User '%s' not found", username)
 			return nil, nil //nolint:nilnil // the auth method is not applicable
 		}
+		if replication.IsWriteProtected() {
+			return nil, nil //nolint:nilnil // user provisioning is disabled while writes are protected
+		}
 		user, err = s.newUser(req.Context(), username, cfg)
 		if err != nil {
 			log.Error("CreateUser: %v", err)
@@ -120,7 +124,7 @@ func (s *SSPI) Verify(req *http.Request, w http.ResponseWriter, store DataStore,
 		}
 	}
 
-	if s.CreateSession {
+	if s.CreateSession && !replication.IsWriteProtected() {
 		handleSignIn(w, req, sess, user)
 	}
 

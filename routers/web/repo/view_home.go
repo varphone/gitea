@@ -22,6 +22,7 @@ import (
 	"gitea.dev/modules/htmlutil"
 	"gitea.dev/modules/httplib"
 	"gitea.dev/modules/log"
+	"gitea.dev/modules/replication"
 	repo_module "gitea.dev/modules/repository"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/svg"
@@ -214,6 +215,11 @@ func updateContextRepoEmptyAndStatus(ctx *context.Context, empty bool, status re
 }
 
 func handleRepoEmptyOrBroken(ctx *context.Context) {
+	if replication.IsWriteProtected() {
+		ctx.HTML(http.StatusOK, tplRepoEMPTY)
+		return
+	}
+
 	showEmpty := true
 	if ctx.Repo.GitRepo == nil {
 		// in case the repo really exists and works, but the status was incorrectly marked as "broken", we need to open and check it again

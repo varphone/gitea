@@ -11,6 +11,7 @@ import (
 	user_model "gitea.dev/models/user"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/optional"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 
 	gouuid "github.com/google/uuid"
@@ -117,7 +118,7 @@ func (r *ReverseProxy) Verify(req *http.Request, w http.ResponseWriter, store Da
 		}
 	}
 
-	if r.CreateSession {
+	if r.CreateSession && !replication.IsWriteProtected() {
 		if sess != nil && (sess.Get("uid") == nil || sess.Get("uid").(int64) != user.ID) {
 			handleSignIn(w, req, sess, user)
 		}
@@ -136,6 +137,9 @@ func (r *ReverseProxy) isAutoRegisterAllowed() bool {
 // newUser creates a new user object for the purpose of automatic registration
 // and populates its name and email with the information present in request headers.
 func (r *ReverseProxy) newUser(req *http.Request) *user_model.User {
+	if replication.IsWriteProtected() {
+		return nil
+	}
 	username := r.getUserName(req)
 	if len(username) == 0 {
 		return nil

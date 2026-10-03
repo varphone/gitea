@@ -32,6 +32,7 @@ import (
 	"gitea.dev/modules/lfs"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/markup"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/structs"
 	"gitea.dev/modules/templates"
@@ -204,7 +205,7 @@ func checkHomeCodeViewable(ctx *context.Context) {
 			return
 		}
 
-		if ctx.IsSigned {
+		if ctx.IsSigned && !replication.IsWriteProtected() {
 			// Set repo notification-status read if unread
 			if err := activities_model.SetRepoReadBy(ctx, ctx.Repo.Repository.ID, ctx.Doer.ID); err != nil {
 				ctx.ServerError("ReadBy", err)

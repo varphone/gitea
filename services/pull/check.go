@@ -27,6 +27,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/process"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/timeutil"
 	asymkey_service "gitea.dev/services/asymkey"
@@ -74,6 +75,9 @@ func realAddPullRequestToCheckQueue(prID int64) {
 }
 
 func StartPullRequestCheckImmediately(ctx context.Context, pr *issues_model.PullRequest) {
+	if replication.IsWriteProtected() {
+		return
+	}
 	if !markPullRequestStatusAsChecking(ctx, pr) {
 		return
 	}
@@ -87,6 +91,9 @@ func StartPullRequestCheckImmediately(ctx context.Context, pr *issues_model.Pull
 // So we can delay the checks for PRs that were not updated recently, only mark their status as
 // "checking", and then next time when these PRs are updated or viewed, the real checks will run.
 func StartPullRequestCheckDelayable(ctx context.Context, pr *issues_model.PullRequest) {
+	if replication.IsWriteProtected() {
+		return
+	}
 	if !markPullRequestStatusAsChecking(ctx, pr) {
 		return
 	}
@@ -105,22 +112,23 @@ func StartPullRequestCheckDelayable(ctx context.Context, pr *issues_model.PullRe
 }
 
 func StartPullRequestCheckOnView(ctx context.Context, pr *issues_model.PullRequest) {
+	if pr.Status != issues_model.PullRequestStatusChecking || replication.IsWriteProtected() {
+		return
+	}
 	// TODO: its correctness totally depends on the "unique queue" feature and the global lock.
 	// So duplicate "start" requests will be ignored if there is already a task in the queue or one is running.
 	// Ideally in the future we should decouple the "unique queue" feature from the "start" request.
-	if pr.Status == issues_model.PullRequestStatusChecking {
-		if setting.IsInTesting {
-			// In testing mode, there might be an "immediate" queue, which is not a real queue, everything is executed in the same goroutine
-			// So we can't use the global lock here, otherwise it will cause a deadlock.
-			AddPullRequestToCheckQueue(pr.ID)
-		} else {
-			// When a PR check starts, the task is popped from the queue and the task handler acquires the global lock
-			// So we need to acquire the global lock here to prevent from duplicate tasks
-			_, _ = globallock.TryLockAndDo(ctx, getPullWorkingLockKey(pr.ID), func(ctx context.Context) error {
-				AddPullRequestToCheckQueue(pr.ID) // the queue is a unique queue and won't add the same task again
-				return nil
-			})
-		}
+	if setting.IsInTesting {
+		// In testing mode, there might be an "immediate" queue, which is not a real queue, everything is executed in the same goroutine
+		// So we can't use the global lock here, otherwise it will cause a deadlock.
+		AddPullRequestToCheckQueue(pr.ID)
+	} else {
+		// When a PR check starts, the task is popped from the queue and the task handler acquires the global lock
+		// So we need to acquire the global lock here to prevent from duplicate tasks
+		_, _ = globallock.TryLockAndDo(ctx, getPullWorkingLockKey(pr.ID), func(ctx context.Context) error {
+			AddPullRequestToCheckQueue(pr.ID) // the queue is a unique queue and won't add the same task again
+			return nil
+		})
 	}
 }
 
@@ -517,19 +525,27 @@ func CheckPRsForBaseBranch(ctx context.Context, baseRepo *repo_model.Repository,
 
 // Init runs the task queue to test all the checking status pull requests
 func Init() error {
-	prPatchCheckerQueue = queue.CreateUniqueQueue(graceful.GetManager().ShutdownContext(), "pr_patch_checker", func(items ...string) []string {
+	queueCtx := graceful.GetManager().ShutdownContext()
+	prPatchCheckerQueue = queue.CreateUniqueQueue(queueCtx, "pr_patch_checker", replication.GuardPrimaryRecoveryHandler(queueCtx, func(items ...string) []string {
 		for _, s := range items {
 			id, _ := strconv.ParseInt(s, 10, 64)
 			checkPullRequestMergeable(id)
 		}
 		return nil
-	})
+	}))
 
 	if prPatchCheckerQueue == nil {
 		return errors.New("unable to create pr_patch_checker queue")
 	}
 
-	go graceful.GetManager().RunWithCancel(prPatchCheckerQueue)
-	go graceful.GetManager().RunWithShutdownContext(InitializePullRequests)
+	if !replication.IsReplicaReadOnly() {
+		go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(prPatchCheckerQueue))
+		go graceful.GetManager().RunWithShutdownContext(func(ctx context.Context) {
+			if err := replication.WaitForPrimaryRecovery(ctx); err != nil {
+				return
+			}
+			InitializePullRequests(ctx)
+		})
+	}
 	return nil
 }

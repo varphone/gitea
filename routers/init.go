@@ -18,6 +18,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/markup"
 	"gitea.dev/modules/markup/external"
+	replication "gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/ssh"
 	"gitea.dev/modules/storage"
@@ -94,6 +95,11 @@ func syncAppConfForGit(ctx context.Context) error {
 	}
 
 	if updated {
+		if replication.IsReplicaReadOnly() {
+			log.Info("Replication replica mode is active; deferring repository hook and runtime-state synchronization while refreshing node-local SSH keys")
+			return asymkey_service.RewriteAllPublicKeys(ctx)
+		}
+
 		log.Info("re-sync repository hooks ...")
 		mustInitCtx(ctx, repo_service.SyncRepositoryHooks)
 
@@ -123,6 +129,7 @@ func InitWebInstalled(ctx context.Context) {
 	translation.InitLocales(ctx)
 
 	setting.LoadSettings()
+	mustInitCtx(ctx, replication.ValidateReplicationPaths)
 	mustInit(storage.Init)
 
 	mailer.NewContext(ctx)
@@ -170,7 +177,11 @@ func InitWebInstalled(ctx context.Context) {
 	mustInit(repo_service.InitLicenseClassifier)
 
 	// Finally start up the cron
-	cron.Init(ctx)
+	if replication.IsReplicaReadOnly() {
+		log.Info("Replication replica mode is active; mutation-capable background workers and scheduled tasks are paused")
+	} else {
+		cron.Init(ctx)
+	}
 }
 
 // NormalRoutes represents non install routes
@@ -179,6 +190,11 @@ func NormalRoutes() *web.Router {
 	r.BeforeRouting(common.ProtocolMiddlewares()...)
 
 	r.AfterRouting(common.MaintenanceModeHandler())
+	if replication.IsReplicaReadOnly() {
+		r.AfterRouting(replication.ReadOnlyMiddleware)
+	} else {
+		r.AfterRouting(replication.PrimaryRecoveryMiddleware)
+	}
 
 	r.Mount("/", web_routers.Routes())
 	r.Mount("/api/v1", apiv1.Routes())

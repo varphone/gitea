@@ -16,6 +16,7 @@ import (
 	"gitea.dev/modules/log"
 	base "gitea.dev/modules/migration"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/secret"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/structs"
@@ -39,11 +40,14 @@ func Run(ctx context.Context, t *admin_model.Task) error {
 
 // Init will start the service to get all unfinished tasks and run them
 func Init() error {
-	taskQueue = queue.CreateSimpleQueue(graceful.GetManager().ShutdownContext(), "task", handler)
+	queueCtx := graceful.GetManager().ShutdownContext()
+	taskQueue = queue.CreateSimpleQueue(queueCtx, "task", replication.GuardPrimaryRecoveryHandler(queueCtx, handler))
 	if taskQueue == nil {
 		return errors.New("unable to create task queue")
 	}
-	go graceful.GetManager().RunWithCancel(taskQueue)
+	if !replication.IsReplicaReadOnly() {
+		go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(taskQueue))
+	}
 	return nil
 }
 

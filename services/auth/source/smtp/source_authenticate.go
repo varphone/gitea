@@ -13,6 +13,7 @@ import (
 	auth_model "gitea.dev/models/auth"
 	user_model "gitea.dev/models/user"
 	"gitea.dev/modules/optional"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/util"
 )
 
@@ -58,6 +59,9 @@ func (source *Source) Authenticate(ctx context.Context, user *user_model.User, u
 
 	if user != nil {
 		return user, nil
+	}
+	if replication.IsWriteProtected() {
+		return nil, user_model.ErrUserNotExist{Name: userName}
 	}
 
 	username := userName

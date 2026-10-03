@@ -24,6 +24,7 @@ import (
 	"gitea.dev/modules/optional"
 	"gitea.dev/modules/process"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/util"
 )
@@ -62,12 +63,13 @@ func init() {
 // InitIssueIndexer initialize issue indexer, syncReindex is true then reindex until
 // all issue index done.
 func InitIssueIndexer(syncReindex bool) {
+	readOnlyReplica := replication.IsReplicaReadOnly()
 	ctx, _, finished := process.GetManager().AddTypedContext(context.Background(), "Service: IssueIndexer", process.SystemProcessType, false)
 
 	indexerInitWaitChannel := make(chan time.Duration, 1)
 
 	// Create the Queue
-	issueIndexerQueue = queue.CreateUniqueQueue(ctx, "issue_indexer", getIssueIndexerQueueHandler(ctx))
+	issueIndexerQueue = queue.CreateUniqueQueue(ctx, "issue_indexer", replication.GuardPrimaryRecoveryHandler(ctx, getIssueIndexerQueueHandler(ctx)))
 
 	graceful.GetManager().RunAtTerminate(finished)
 
@@ -122,15 +124,25 @@ func InitIssueIndexer(syncReindex bool) {
 			log.Info("PID: %d Issue Indexer closed", os.Getpid())
 		})
 
-		// Start processing the queue
-		go graceful.GetManager().RunWithCancel(issueIndexerQueue)
+		runWorkers := !readOnlyReplica || setting.Indexer.IssueType == "bleve"
+		if !runWorkers {
+			log.Info("Replication replica mode is active; shared issue index updates are paused")
+		} else {
+			// Start processing the queue
+			go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(issueIndexerQueue))
 
-		// Populate the index
-		if !existed {
-			if syncReindex {
-				graceful.GetManager().RunWithShutdownContext(populateIssueIndexer)
-			} else {
-				go graceful.GetManager().RunWithShutdownContext(populateIssueIndexer)
+			// Populate the index
+			if !existed {
+				if syncReindex {
+					graceful.GetManager().RunWithShutdownContext(populateIssueIndexer)
+				} else {
+					go graceful.GetManager().RunWithShutdownContext(func(ctx context.Context) {
+						if err := replication.WaitForPrimaryRecovery(ctx); err != nil {
+							return
+						}
+						populateIssueIndexer(ctx)
+					})
+				}
 			}
 		}
 

@@ -14,6 +14,7 @@ import (
 	"gitea.dev/modules/httpcache"
 	"gitea.dev/modules/httplib"
 	"gitea.dev/modules/log"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/storage"
 	"gitea.dev/services/attachment"
@@ -210,9 +211,11 @@ func ServeAttachment(ctx *context.Context, uuid string) {
 		}
 	}
 
-	if err := attach.IncreaseDownloadCount(ctx); err != nil {
-		ctx.ServerError("IncreaseDownloadCount", err)
-		return
+	if ctx.Req.Method == http.MethodGet && !replication.IsWriteProtected() {
+		if err := attach.IncreaseDownloadCount(ctx); err != nil {
+			ctx.ServerError("IncreaseDownloadCount", err)
+			return
+		}
 	}
 
 	if setting.Attachment.Storage.ServeDirect() {

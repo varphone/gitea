@@ -23,6 +23,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/markup"
 	"gitea.dev/modules/markup/markdown"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/templates"
 	"gitea.dev/modules/timeutil"
@@ -110,9 +111,11 @@ func findWikiRepoCommit(ctx *context.Context) (*git.Repository, *git.Commit, err
 			return wikiGitRepo, nil, errBranch
 		}
 		// update the default branch in the database
-		errDb := repo_model.UpdateRepositoryColsNoAutoTime(ctx, &repo_model.Repository{ID: ctx.Repo.Repository.ID, DefaultWikiBranch: gitRepoDefaultBranch}, "default_wiki_branch")
-		if errDb != nil {
-			return wikiGitRepo, nil, errDb
+		if !replication.IsWriteProtected() {
+			errDb := repo_model.UpdateRepositoryColsNoAutoTime(ctx, &repo_model.Repository{ID: ctx.Repo.Repository.ID, DefaultWikiBranch: gitRepoDefaultBranch}, "default_wiki_branch")
+			if errDb != nil {
+				return wikiGitRepo, nil, errDb
+			}
 		}
 		ctx.Repo.Repository.DefaultWikiBranch = gitRepoDefaultBranch
 		// retry to get the commit from the correct default branch

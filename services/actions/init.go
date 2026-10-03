@@ -14,6 +14,7 @@ import (
 	"gitea.dev/modules/graceful"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/util"
 	notify_service "gitea.dev/services/notify"
@@ -60,12 +61,19 @@ func Init(ctx context.Context) error {
 		return nil
 	}
 
-	jobEmitterQueue = queue.CreateUniqueQueue(graceful.GetManager().ShutdownContext(), "actions_ready_job", jobEmitterQueueHandler)
+	jobEmitterQueueCtx := graceful.GetManager().ShutdownContext()
+	jobEmitterQueue = queue.CreateUniqueQueue(jobEmitterQueueCtx, "actions_ready_job", replication.GuardPrimaryRecoveryHandler(jobEmitterQueueCtx, jobEmitterQueueHandler))
 	if jobEmitterQueue == nil {
 		return errors.New("unable to create actions_ready_job queue")
 	}
-	go graceful.GetManager().RunWithCancel(jobEmitterQueue)
+	readOnlyReplica := replication.IsReplicaReadOnly()
+	if !readOnlyReplica {
+		go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(jobEmitterQueue))
+	}
 
 	notify_service.RegisterNotifier(NewNotifier())
+	if readOnlyReplica {
+		return nil
+	}
 	return initGlobalRunnerToken(ctx)
 }

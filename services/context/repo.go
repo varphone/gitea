@@ -29,6 +29,7 @@ import (
 	code_indexer "gitea.dev/modules/indexer/code"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/optional"
+	"gitea.dev/modules/replication"
 	repo_module "gitea.dev/modules/repository"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/util"
@@ -113,7 +114,8 @@ type Repository struct {
 	CommitID     string
 	CommitsCount int64
 
-	PullRequestCtx *PullRequestContext
+	PullRequestCtx              *PullRequestContext
+	canReadGitDespiteStaleState *bool
 }
 
 // CanWriteToBranch checks if the branch is writable by the user
@@ -490,6 +492,23 @@ type repoAssignmentPrepareDataStruct struct {
 	repo      *repo_model.Repository
 }
 
+func canReadGitDespiteStaleState(ctx *Context) bool {
+	if ctx.Repo.canReadGitDespiteStaleState != nil {
+		return *ctx.Repo.canReadGitDespiteStaleState
+	}
+	repo := ctx.Repo.Repository
+	if repo.IsBeingCreated() || (!repo.IsEmpty && !repo.IsBroken()) {
+		return false
+	}
+	canRead := ctx.Repo.GitRepo != nil && replication.IsWriteProtected()
+	if canRead {
+		reallyEmpty, err := ctx.Repo.GitRepo.IsEmpty()
+		canRead = err == nil && !reallyEmpty
+	}
+	ctx.Repo.canReadGitDespiteStaleState = &canRead
+	return canRead
+}
+
 func repoAssignmentPreCheck(ctx *Context) {
 	if ctx.Data["Repository"] != nil {
 		setting.PanicInDevOrTesting("RepoAssignment should not be executed twice")
@@ -734,7 +753,7 @@ func repoAssignmentPrepareGitRepo(ctx *Context, data *repoAssignmentPrepareDataS
 }
 
 func repoAssignmentPrepareBranches(ctx *Context, data *repoAssignmentPrepareDataStruct) {
-	if data.repo.IsEmpty {
+	if data.repo.IsEmpty && !canReadGitDespiteStaleState(ctx) {
 		return
 	}
 	branchOpts := git_model.FindBranchOptions{
@@ -750,10 +769,23 @@ func repoAssignmentPrepareBranches(ctx *Context, data *repoAssignmentPrepareData
 
 	// non-empty repo should have at least 1 branch, so this repository's branches haven't been synced yet
 	if branchesTotal == 0 { // fallback to do a sync immediately
-		branchesTotal, err = repo_module.SyncRepoBranches(ctx, ctx.Repo.Repository.ID, 0)
-		if err != nil {
-			ctx.ServerError("SyncRepoBranches", err)
-			return
+		if replication.IsWriteProtected() {
+			if ctx.Repo.GitRepo == nil {
+				ctx.Data["BranchesCount"] = 0
+				return
+			}
+			_, branchCount, branchErr := ctx.Repo.GitRepo.GetBranchNames(0, 0)
+			branchesTotal, err = int64(branchCount), branchErr
+			if err != nil {
+				ctx.ServerError("GetBranchNames", err)
+				return
+			}
+		} else {
+			branchesTotal, err = repo_module.SyncRepoBranches(ctx, ctx.Repo.Repository.ID, 0)
+			if err != nil {
+				ctx.ServerError("SyncRepoBranches", err)
+				return
+			}
 		}
 	}
 
@@ -762,7 +794,7 @@ func repoAssignmentPrepareBranches(ctx *Context, data *repoAssignmentPrepareData
 
 func repoAssignmentPreparePullRequests(ctx *Context, data *repoAssignmentPrepareDataStruct) {
 	repo := data.repo
-	if repo.IsEmpty {
+	if repo.IsEmpty && !canReadGitDespiteStaleState(ctx) {
 		return
 	}
 	// Pull request is allowed if this is a fork repository, and base repository accepts pull requests.
@@ -955,11 +987,12 @@ func RepoRefByType(detectRefType git.RefType) func(*Context) {
 	return func(ctx *Context) {
 		var err error
 		refType := detectRefType
-		if ctx.Repo.Repository.IsBeingCreated() || ctx.Repo.Repository.IsBroken() {
+		canReadGit := canReadGitDespiteStaleState(ctx)
+		if ctx.Repo.Repository.IsBeingCreated() || (ctx.Repo.Repository.IsBroken() && !canReadGit) {
 			return // no git repo, so do nothing, users will see a "migrating" UI provided by "migrate/migrating.tmpl", or empty repo guide
 		}
 		// Empty repository does not have reference information.
-		if ctx.Repo.Repository.IsEmpty {
+		if ctx.Repo.Repository.IsEmpty && !canReadGit {
 			// assume the user is viewing the (non-existent) default branch
 			ctx.Repo.BranchName = ctx.Repo.Repository.DefaultBranch
 			ctx.Repo.RefFullName = git.RefNameFromBranch(ctx.Repo.BranchName)
@@ -1079,6 +1112,14 @@ func RepoRefByType(detectRefType git.RefType) func(*Context) {
 			}
 		}
 
+		if canReadGit && ctx.Repo.Commit != nil {
+			ctx.Repo.Repository.IsEmpty = false
+			if ctx.Repo.Repository.IsBroken() {
+				ctx.Repo.Repository.Status = repo_model.RepositoryReady
+			}
+			ctx.Data["IsEmptyRepo"] = false
+		}
+
 		ctx.Data["RefFullName"] = ctx.Repo.RefFullName
 		ctx.Data["RefTypeNameSubURL"] = ctx.Repo.RefTypeNameSubURL()
 		ctx.Data["TreePath"] = ctx.Repo.TreePath
@@ -1098,8 +1139,10 @@ func RepoRefByType(detectRefType git.RefType) func(*Context) {
 			rel, err := repo_model.GetRelease(ctx, ctx.Repo.Repository.ID, ctx.Repo.RefFullName.TagName())
 			if err == nil && rel.NumCommits <= 0 {
 				rel.NumCommits = ctx.Repo.CommitsCount
-				if err := repo_model.UpdateReleaseNumCommits(ctx, rel); err != nil {
-					log.Error("UpdateReleaseNumCommits", err)
+				if !replication.IsWriteProtected() {
+					if err := repo_model.UpdateReleaseNumCommits(ctx, rel); err != nil {
+						log.Error("UpdateReleaseNumCommits", err)
+					}
 				}
 			}
 		}

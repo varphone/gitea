@@ -12,6 +12,7 @@ import (
 	user_model "gitea.dev/models/user"
 	"gitea.dev/modules/auth/pam"
 	"gitea.dev/modules/optional"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 
 	"github.com/google/uuid"
@@ -30,6 +31,9 @@ func (source *Source) Authenticate(ctx context.Context, user *user_model.User, u
 
 	if user != nil {
 		return user, nil
+	}
+	if replication.IsWriteProtected() {
+		return nil, user_model.ErrUserNotExist{Name: userName}
 	}
 
 	// Allow PAM sources with `@` in their name, like from Active Directory

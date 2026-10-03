@@ -34,6 +34,7 @@ import (
 	issue_template "gitea.dev/modules/issue/template"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/optional"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/templates"
 	"gitea.dev/modules/translation"
@@ -149,7 +150,7 @@ func getPullInfo(ctx *context.Context) (issue *issues_model.Issue, ok bool) {
 		return nil, false
 	}
 
-	if ctx.IsSigned {
+	if ctx.IsSigned && !replication.IsWriteProtected() {
 		// Update issue-user.
 		if err = activities_model.SetIssueReadBy(ctx, issue.ID, ctx.Doer.ID); err != nil {
 			ctx.ServerError("ReadBy", err)
@@ -800,9 +801,13 @@ func viewPullFiles(ctx *context.Context, beforeCommitID, afterCommitID string) {
 	var reviewState *pull_model.ReviewState
 	var numViewedFiles int
 	if ctx.IsSigned && isShowAllCommits {
-		reviewState, err = gitdiff.SyncUserSpecificDiff(ctx, ctx.Doer.ID, pull, gitRepo, diff, diffOptions)
+		if replication.IsWriteProtected() {
+			reviewState, err = gitdiff.GetUserSpecificDiff(ctx, ctx.Doer.ID, pull, gitRepo, diff, diffOptions)
+		} else {
+			reviewState, err = gitdiff.SyncUserSpecificDiff(ctx, ctx.Doer.ID, pull, gitRepo, diff, diffOptions)
+		}
 		if err != nil {
-			ctx.ServerError("SyncUserSpecificDiff", err)
+			ctx.ServerError("UserSpecificDiff", err)
 			return
 		}
 		if reviewState != nil {

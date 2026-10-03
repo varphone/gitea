@@ -10,6 +10,7 @@ import (
 	"gitea.dev/modules/graceful"
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/queue"
+	"gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/templates"
 	sender_service "gitea.dev/services/mailer/sender"
@@ -45,7 +46,8 @@ func NewContext(ctx context.Context) {
 
 	_ = templates.MailRenderer()
 
-	mailQueue = queue.CreateSimpleQueue(graceful.GetManager().ShutdownContext(), "mail", func(items ...*sender_service.Message) []*sender_service.Message {
+	queueCtx := graceful.GetManager().ShutdownContext()
+	mailQueue = queue.CreateSimpleQueue(queueCtx, "mail", replication.GuardPrimaryRecoveryHandler(queueCtx, func(items ...*sender_service.Message) []*sender_service.Message {
 		for _, msg := range items {
 			gomailMsg := msg.ToMessage()
 			log.Trace("New e-mail sending request %s: %s", gomailMsg.GetGenHeader("To"), msg.Info)
@@ -56,11 +58,13 @@ func NewContext(ctx context.Context) {
 			}
 		}
 		return nil
-	})
+	}))
 	if mailQueue == nil {
 		log.Fatal("Unable to create mail queue")
 	}
-	go graceful.GetManager().RunWithCancel(mailQueue)
+	if !replication.IsReplicaReadOnly() {
+		go graceful.GetManager().RunWithCancel(replication.RunAfterPrimaryRecovery(mailQueue))
+	}
 }
 
 // SendAsync send emails asynchronously (make it mockable)
