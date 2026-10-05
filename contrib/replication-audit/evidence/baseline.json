@@ -1,0 +1,539 @@
+{
+  "default": {
+    "TestLoadConfigValidation": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/primary": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/replica": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/disabled_full_scan": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/custom_full_scan": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/negative_full_scan": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/invalid_full_scan": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/short_token": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/public_listen": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/invalid_source": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/proxy_override": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/invalid_proxy": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/cleartext_remote": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/wrong_service": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestDefaultFinalSessionTimeout": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestDefaultFullScanInterval": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestReadOnlyMiddleware": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestReadOnlyMiddlewareRendersReplicaNoticeForBrowsers": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestPreflightResumesVerifiedCheckpoint": {
+      "diagnostics": [
+        "control_server_test.go:79: resume status=409 body=preflight recovery checkpoint is unavailable or invalid"
+      ],
+      "status": "fail",
+      "elapsed": 0.01
+    },
+    "TestPreflightReusesCompletedCheckpoint": {
+      "diagnostics": [
+        "control_server_test.go:112: status=202 body={\"id\":\"20261003T110149.867413526Z\",\"state\":\"creating\",\"created_at\":\"2026-10-03T11:01:49.870874929Z\",\"size\":0,\"root_mode\":0}"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestControlAuthenticationAndRouting": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestIncrementalHTTPRoundTripAndSecondDelta": {
+      "diagnostics": [
+        "fence_linux_test.go:94: preflight task 20261003T110149.884458232Z failed: identify OAuth2 signing config for replication manifest: OAuth2 JWT signing key path \"jwt/private.pem\" is outside APP_WORK_PATH \"/tmp/TestIncrementalHTTPRoundTripAndSecondDelta1230948737/001/current\""
+      ],
+      "status": "fail",
+      "elapsed": 1.02
+    },
+    "TestIncrementalSnapshotServesTaskManifestFromMemory": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestPrimaryRecoveryRetriesAfterTransientFailure": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestFinalSessionTimeoutRestartsPrimaryWithoutClient": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestFinalScanDetectsSameSizeAndRestoredMtime": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestIncrementalFinalizationOnlyRechunksChanges": {
+      "diagnostics": [
+        "fence_linux_test.go:311: snapshot manifest 20261003T110150.911788128Z did not become available"
+      ],
+      "status": "fail",
+      "elapsed": 2.01
+    },
+    "TestWriteFenceCoordinatesSSHAndSnapshot": {
+      "status": "pass",
+      "elapsed": 0.1
+    },
+    "TestContentDefinedChunksResynchronizeAfterInsertion": {
+      "status": "pass",
+      "elapsed": 0.05
+    },
+    "TestIncrementalManifestSignatureAndTamperDetection": {
+      "diagnostics": [
+        "incremental_test.go:86: valid signed manifest rejected: invalid general token signing secret fingerprint"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestBuildIncrementalStageReusesAndDeletes": {
+      "status": "pass",
+      "elapsed": 0.07
+    },
+    "TestRequestManifestWaitsForActiveReplication": {
+      "diagnostics": [
+        "incremental_test.go:184: jsontext: unexpected EOF"
+      ],
+      "status": "fail",
+      "elapsed": 7.71
+    },
+    "TestDecodeManifestAcceptsCompleteDocumentWithTruncatedTransportTrailer": {
+      "diagnostics": [
+        "incremental_test.go:198: read manifest: unexpected EOF (decode: jsontext: unexpected EOF)"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestDecodeManifestRejectsTrailingData": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestRequestManifestRetriesTransientGatewayErrors": {
+      "diagnostics": [
+        "incremental_test.go:245: context deadline exceeded"
+      ],
+      "status": "fail",
+      "elapsed": 5
+    },
+    "TestFetchMissingChunksDefersChangedPreflightChunks": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestResumableFinalManifestSelectsLatestTrustedCheckpoint": {
+      "diagnostics": [
+        "incremental_test.go:314: resumable manifest=<nil>"
+      ],
+      "status": "fail",
+      "elapsed": 0.01
+    },
+    "TestCorruptChunkCacheIsNotTrusted": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestPruneManifestHistoryPreservesCurrentBaseline": {
+      "diagnostics": [
+        "incremental_test.go:402: interrupted manifest temporary file was not pruned: /tmp/TestPruneManifestHistoryPreservesCurrentBaseline261171038/001/20260101T000000.000000000Z.json.tmp: <nil>"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestPreviousManifestRequiresValidSignature": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestPreviousManifestAcceptsSameReleaseDifferentBuild": {
+      "diagnostics": [
+        "incremental_test.go:450: baseline from the same Gitea release was not trusted"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestLoadManifestRejectsTrailingJSON": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestPreviousManifestRecoversSignedTrailingBaseline": {
+      "diagnostics": [
+        "incremental_test.go:509: signed baseline with trailing data was not recovered"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestBuildIncrementalStageSupportsReadOnlyDirectories": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestPreflightBaselineOnlyHashesChangedFiles": {
+      "diagnostics": [
+        "incremental_test.go:626: snapshot manifest 20261003T110205.903429335Z did not become available"
+      ],
+      "status": "fail",
+      "elapsed": 2.01
+    },
+    "TestPreflightPerformsPeriodicFullScan": {
+      "diagnostics": [
+        "incremental_test.go:666: snapshot manifest 20261003T110207.981582539Z did not become available"
+      ],
+      "status": "fail",
+      "elapsed": 2.08
+    },
+    "TestPreflightReusesTrustedPreflightManifest": {
+      "diagnostics": [
+        "incremental_test.go:706: snapshot manifest 20261003T110209.993106822Z did not become available"
+      ],
+      "status": "fail",
+      "elapsed": 2.01
+    },
+    "TestFullVerificationRejectsContentChangeWithUnchangedMetadata": {
+      "status": "pass",
+      "elapsed": 0.04
+    },
+    "TestInstallSnapshotRollbackAndSuccess": {
+      "status": "fail",
+      "elapsed": 0.08
+    },
+    "TestInstallSnapshotRollbackAndSuccess/regenerate_failure_rolls_back": {
+      "diagnostics": [
+        "install_test.go:114: systemctl actions = [is-active:gitea.socket is-active:gitea.service stop:gitea.service stop:gitea.service]"
+      ],
+      "status": "fail",
+      "elapsed": 0.04
+    },
+    "TestInstallSnapshotRollbackAndSuccess/readiness_failure_rolls_back": {
+      "status": "pass",
+      "elapsed": 0.02
+    },
+    "TestInstallSnapshotRollbackAndSuccess/success_activates_snapshot": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestInstallSnapshotRollbackAndSuccess/cleanup_failure_is_warning_after_activation": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestSocketActivationIsRejected": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestResolvedPathDetectsSymlinkEscape": {
+      "status": "pass",
+      "elapsed": 0
+    }
+  },
+  "nojsonv2": {
+    "TestLoadConfigValidation": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/primary": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/replica": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/disabled_full_scan": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/custom_full_scan": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/negative_full_scan": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/invalid_full_scan": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/short_token": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/public_listen": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/invalid_source": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/proxy_override": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/invalid_proxy": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/cleartext_remote": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestLoadConfigValidation/wrong_service": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestDefaultFinalSessionTimeout": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestDefaultFullScanInterval": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestReadOnlyMiddleware": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestReadOnlyMiddlewareRendersReplicaNoticeForBrowsers": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestPreflightResumesVerifiedCheckpoint": {
+      "diagnostics": [
+        "control_server_test.go:79: resume status=409 body=preflight recovery checkpoint is unavailable or invalid"
+      ],
+      "status": "fail",
+      "elapsed": 0.06
+    },
+    "TestPreflightReusesCompletedCheckpoint": {
+      "diagnostics": [
+        "control_server_test.go:112: status=202 body={\"id\":\"20261003T110540.709954819Z\",\"state\":\"creating\",\"created_at\":\"2026-10-03T11:05:40.713617947Z\",\"root_mode\":0}"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestControlAuthenticationAndRouting": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestIncrementalHTTPRoundTripAndSecondDelta": {
+      "diagnostics": [
+        "fence_linux_test.go:94: preflight task 20261003T110540.726223342Z failed: identify OAuth2 signing config for replication manifest: OAuth2 JWT signing key path \"jwt/private.pem\" is outside APP_WORK_PATH \"/tmp/TestIncrementalHTTPRoundTripAndSecondDelta4206866950/001/current\""
+      ],
+      "status": "fail",
+      "elapsed": 1.02
+    },
+    "TestIncrementalSnapshotServesTaskManifestFromMemory": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestPrimaryRecoveryRetriesAfterTransientFailure": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestFinalSessionTimeoutRestartsPrimaryWithoutClient": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestFinalScanDetectsSameSizeAndRestoredMtime": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestIncrementalFinalizationOnlyRechunksChanges": {
+      "diagnostics": [
+        "fence_linux_test.go:311: snapshot manifest 20261003T110541.756763701Z did not become available"
+      ],
+      "status": "fail",
+      "elapsed": 2.01
+    },
+    "TestWriteFenceCoordinatesSSHAndSnapshot": {
+      "status": "pass",
+      "elapsed": 0.1
+    },
+    "TestContentDefinedChunksResynchronizeAfterInsertion": {
+      "status": "pass",
+      "elapsed": 0.04
+    },
+    "TestIncrementalManifestSignatureAndTamperDetection": {
+      "diagnostics": [
+        "incremental_test.go:86: valid signed manifest rejected: invalid general token signing secret fingerprint"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestBuildIncrementalStageReusesAndDeletes": {
+      "status": "pass",
+      "elapsed": 0.02
+    },
+    "TestRequestManifestWaitsForActiveReplication": {
+      "diagnostics": [
+        "incremental_test.go:184: invalid general token signing secret fingerprint"
+      ],
+      "status": "fail",
+      "elapsed": 0.34
+    },
+    "TestDecodeManifestAcceptsCompleteDocumentWithTruncatedTransportTrailer": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestDecodeManifestRejectsTrailingData": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestRequestManifestRetriesTransientGatewayErrors": {
+      "diagnostics": [
+        "incremental_test.go:245: invalid general token signing secret fingerprint"
+      ],
+      "status": "fail",
+      "elapsed": 1.5
+    },
+    "TestFetchMissingChunksDefersChangedPreflightChunks": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestResumableFinalManifestSelectsLatestTrustedCheckpoint": {
+      "diagnostics": [
+        "incremental_test.go:314: resumable manifest=<nil>"
+      ],
+      "status": "fail",
+      "elapsed": 0.01
+    },
+    "TestCorruptChunkCacheIsNotTrusted": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestPruneManifestHistoryPreservesCurrentBaseline": {
+      "diagnostics": [
+        "incremental_test.go:402: interrupted manifest temporary file was not pruned: /tmp/TestPruneManifestHistoryPreservesCurrentBaseline1813730388/001/20260101T000000.000000000Z.json.tmp: <nil>"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestPreviousManifestRequiresValidSignature": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestPreviousManifestAcceptsSameReleaseDifferentBuild": {
+      "diagnostics": [
+        "incremental_test.go:450: baseline from the same Gitea release was not trusted"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestLoadManifestRejectsTrailingJSON": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestPreviousManifestRecoversSignedTrailingBaseline": {
+      "diagnostics": [
+        "incremental_test.go:509: signed baseline with trailing data was not recovered"
+      ],
+      "status": "fail",
+      "elapsed": 0
+    },
+    "TestBuildIncrementalStageSupportsReadOnlyDirectories": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestPreflightBaselineOnlyHashesChangedFiles": {
+      "diagnostics": [
+        "incremental_test.go:626: snapshot manifest 20261003T110545.814243168Z did not become available"
+      ],
+      "status": "fail",
+      "elapsed": 2.01
+    },
+    "TestPreflightPerformsPeriodicFullScan": {
+      "diagnostics": [
+        "incremental_test.go:666: snapshot manifest 20261003T110547.891974004Z did not become available"
+      ],
+      "status": "fail",
+      "elapsed": 2.08
+    },
+    "TestPreflightReusesTrustedPreflightManifest": {
+      "diagnostics": [
+        "incremental_test.go:706: snapshot manifest 20261003T110549.902097119Z did not become available"
+      ],
+      "status": "fail",
+      "elapsed": 2.01
+    },
+    "TestFullVerificationRejectsContentChangeWithUnchangedMetadata": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestInstallSnapshotRollbackAndSuccess": {
+      "status": "fail",
+      "elapsed": 0.05
+    },
+    "TestInstallSnapshotRollbackAndSuccess/regenerate_failure_rolls_back": {
+      "diagnostics": [
+        "install_test.go:114: systemctl actions = [is-active:gitea.socket is-active:gitea.service stop:gitea.service stop:gitea.service]"
+      ],
+      "status": "fail",
+      "elapsed": 0.01
+    },
+    "TestInstallSnapshotRollbackAndSuccess/readiness_failure_rolls_back": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestInstallSnapshotRollbackAndSuccess/success_activates_snapshot": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestInstallSnapshotRollbackAndSuccess/cleanup_failure_is_warning_after_activation": {
+      "status": "pass",
+      "elapsed": 0.01
+    },
+    "TestSocketActivationIsRejected": {
+      "status": "pass",
+      "elapsed": 0
+    },
+    "TestResolvedPathDetectsSymlinkEscape": {
+      "status": "pass",
+      "elapsed": 0
+    }
+  }
+}

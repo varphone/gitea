@@ -1,0 +1,234 @@
+# Replication 全面审核（2026-10-03）
+
+> 后续审核（基线 `9903b3cda4` 与当前工作区未提交改动）见 [review-2026-10-05.md](review-2026-10-05.md)。
+>
+> 历史说明：本页记录的是 2026-10-03 基线（暂存树 + `RENAME_EXCHANGE` 安装）的审核结论。该安装机制随后被"单树就地分块补丁"取代，因此文中涉及 `buildIncrementalStage`、`installPreparedSnapshot*`、回滚/交换、reflink 复制回退的结论与优化建议仅作历史记录；当前实现与部署说明以 [contrib/replication/README.md](../replication/README.md) 为准。
+
+## 范围与结论
+
+基线：`f66e14a3bc`，Linux，Go 1.27.1。审核涵盖配置、控制协议、内容分块、扫描、传输、安装、恢复、HTTP/SSH 写保护、后台队列、cron，以及 systemd、Polkit 和 Nginx 示例。本报告记录基线问题及复现证据；2026-10-03 已按下方分组完成业务修复和回归覆盖。
+
+基线发现 11 项问题或需要补齐的保护措施，其中 6 项为 P1。没有确认 P0 数据丢失或未认证远程接管问题。下表记录基线缺陷；当前修复状态和验证结果见“修复状态与验证”。真实双节点故障演练、配额耗尽和生产负载指标仍需部署环境验证。
+
+证据分为「隔离复现」「代码路径确认」和「待验证风险」。优先级：P1 为同步阻断、安全边界失效或核心功能不可用；P2 为故障条件下的可靠性、资源保护和验证缺口；P3 为一般优化。严重性以所列触发条件成立为前提。
+
+## 问题清单
+
+| ID | 优先级 | 维度 | 问题 | 证据 |
+| --- | --- | --- | --- | --- |
+| R01 | P1 | 正确性、可靠性 | JSON v2 拒绝完整 manifest | 隔离复现 |
+| R02 | P1 | 兼容性、正确性 | manifest 摘要依赖构建使用的 JSON 实现 | 跨构建复现 |
+| R03 | P1 | 完整性、可靠性 | 保存本地配置导致安装后的目录校验失败 | 隔离复现 |
+| R04 | P1 | 安全性、可靠性 | 禁用配置跳过校验，但 CLI 仍执行服务操作 | 模拟服务复现、代码路径确认 |
+| R05 | P1 | 安全性、正确性 | 只读请求可在认证过程中隐式写入 | 代码路径确认 |
+| R06 | P1 | 完整性 | SSH 所需的内部 POST 被只读中间件拦截 | 中间件复现、调用链确认 |
+| R07 | P2 | 可靠性、性能 | 响应写入无超时，慢客户端占满 chunk 槽位 | 阻塞 writer 复现、代码路径确认 |
+| R08 | P2 | 可靠性、可用性 | 最终扫描不受最终会话停机预算约束 | 代码路径确认 |
+| R09 | P2 | 可靠性、性能 | 最终阶段前没有磁盘容量预检 | 代码路径确认；ENOSPC 注入待补 |
+| R10 | P2 | 验证能力 | 测试夹具失效，核心链路缺乏有效回归保障 | 默认和 JSON v1 基线测试 |
+| R11 | P2 | 完整性、运维 | 配置、恢复和提升流程缺少完整部署文档 | 文档与部署文件检查 |
+
+### 修复状态与验证
+
+| ID | 状态 | 修复及回归覆盖 |
+| --- | --- | --- |
+| R01 | 已修复 | manifest 使用带字节上限的 JSON v1 流式解码；回归覆盖尾部空白、额外值、截断和 gzip 校验和。 |
+| R02 | 已修复 | manifest 摘要和 wire 编码固定为 JSON v1，格式升级到 6，并保留格式 2–5 读取。v28 的 `modules/json` 直接使用 `encoding/json/v2`，因此当前分支不能在 `GOEXPERIMENT=nojsonv2` 下构建；固定 JSON v1 codec 已在默认构建中回归验证。旧 JSON v2 格式 5 摘要按失效检查点处理并重建基线。 |
+| R03 | 已修复 | 本地配置引起的祖先目录时间戳变化仅在目录项哈希确认其他内容未变时容忍；安装后仍校验树内容。 |
+| R04 | 已修复 | 禁用入口在执行 listener、restore 等副作用前返回；已有主节点故障检查点仍使用固定安全服务配置恢复。 |
+| R05 | 已修复 | 只读模式阻止密码迁移、自动注册、用户资料/SSH key 更新、会话建立和 TOTP 消费；已有用户的无副作用凭证验证可继续。 |
+| R06 | 已修复 | 只对白名单 SSH 内部 POST 开放只读路由；key 活跃时间更新在只读模式下成功无写入。 |
+| R07 | 已修复 | 控制 HTTP server 设置可配置正值 `CONTROL_WRITE_TIMEOUT`；配置及 server timeout 有单测。 |
+| R08 | 已修复 | `PRIMARY_OUTAGE_TIMEOUT` 从获取写 fence 前启动并贯穿主机停止、最终扫描、传输、安装和恢复释放；超时进入持久化主机恢复流程。 |
+| R09 | 已修复 | chunk 获取前按文件系统分别检查可用字节与 inode，并保留安全余量；statfs 估算和不足/溢出用例有单测。该检查不预留空间，后续 ENOSPC 仍走恢复流程。 |
+| R10 | 已修复 | 修正测试配置 provider、签名指纹、请求幂等 ID、临时文件清理和回滚注入夹具；包测试、竞态测试及认证相关包测试通过。 |
+| R11 | 已修复 | 新增配置示例和部署/操作手册，说明支持边界、超时、容量、备份、检查点、数据新鲜度和提升步骤。 |
+
+v28 变基后验证：`go test ./modules/replication`、`go test -race ./modules/replication`、`go test ./cmd ./modules/json ./routers/private ./routers/web/repo ./services/auth ./services/automerge ./services/repository/archiver` 及 Darwin/Windows replication 交叉编译均通过。当前 Go 1.27.1 下尝试 `GOEXPERIMENT=nojsonv2` 会因 `modules/json/jsonv2.go` 直接导入 `encoding/json/v2` 而无法编译。锁定版 golangci-lint v2.13.2 对本次改动包定向检查通过；`make lint-go` 因环境 PATH 缺少 `golangci-lint` 可执行文件未能启动。尚未进行真实双节点 TLS/HTTP 慢读、磁盘 quota/ENOSPC、真实服务 failover 演练和生产规模性能测量；这些是环境验证项，不代表已在测试中覆盖。
+
+### R01：完整 manifest 被 JSON v2 解码器拒绝
+
+位置：`modules/replication/incremental.go:2381`、`incremental_client.go:561`、`modules/json/jsonv2.go:107`。
+
+两个 manifest 解码函数在第一次 `Decode` 后再调用一次 `Decode`，要求返回精确的 `io.EOF`。JSON v2 包装器每次使用 `UnmarshalRead`，对已经读完的输入返回 `jsontext: unexpected EOF`。当前默认构建包含 `jsonv2.go`。
+
+`TestAuditCodec` 对自己刚生成的完整 manifest 测得：JSON v1 的磁盘与网络解码均成功，JSON v2 均失败。现有 `TestPreflightResumesVerifiedCheckpoint` 同样受到影响。影响包括网络同步、磁盘 manifest 加载、基线复用和中断恢复。
+
+建议：为 replication 明确采用具备连续解码语义的解码器，保留字节上限、尾随数据拒绝和传输错误处理。不要将所有 `unexpected EOF` 当成成功，以免放过截断文档。验收需同时覆盖完整文档、空白尾部、第二个 JSON 值、截断、gzip CRC 错误和超限数据。
+
+### R02：签名摘要没有固定序列化规则
+
+位置：`modules/replication/incremental.go:1436`、`:1542`、`:1566`。
+
+摘要来自当前 `modules/json` 序列化后的字节。JSON v1 与 v2 的数值 `omitempty` 和 HTML 字符转义行为不同。使用固定时间、固定指纹和相同结构，普通文件名的摘要在两个构建下已经不同；包含 `<`、`&` 的文件名还会出现转义差异。
+
+跨构建探针先用 JSON v1 写出签名 manifest，再用 JSON v2 通过单次 `Unmarshal` 读取以绕开 R01：HMAC 签名仍有效，但 `validateIncrementalManifest` 返回 `manifest digest mismatch`。因此修好 R01 后，混合构建或编译器升级仍会破坏同步和旧检查点恢复。
+
+建议：固定协议使用的序列化规则、字段省略规则和转义规则。检查大条目手工流式编码与普通批量编码的一致性。若改变已有摘要，必须提供格式版本和旧检查点读取策略，不能直接重签后无条件信任原始内容。验收覆盖空文件、零数值、特殊字符、大条目、旧格式及同版本不同构建。
+
+### R03：本地配置的父目录时间戳导致回滚
+
+位置：`modules/replication/install.go:541`、`incremental_client.go:3512`。
+
+`app.ini` 被排除在同步内容之外，但其父目录仍在 manifest 中，并记录 `mtime_ns`。暂存树恢复目录时间戳后，`preserveLocalStandbyConfiguration` 在已交换的新根内写回本地配置，改变 `custom/conf` 的时间戳。安装后的校验仅对本地日志目录放宽时间戳比较，配置目录仍要求精确一致。
+
+`TestAuditLocalConfig` 使用正确的主节点路径排除配置，构建暂存目录、保存本地配置，再校验，稳定得到 `expected_path="custom/conf" ... mtime=true`。现有 HTTP 测试修复签名和配置夹具后，也进入此失败并执行回滚。配置位于工作目录之外的部署不一定触发该问题。
+
+建议：明确本地配置、SSH 密钥和日志活动对祖先目录元数据的影响。可在本地配置恢复后恢复受影响目录的预期时间戳，或在核实目录内容和模式后，仅对已知本地文件影响的目录放宽时间戳要求。不要全面跳过目录内容校验。验收包含配置在根内、根外、符号链接，以及 SSH 密钥重新生成改变目录内容的情况。
+
+### R04：`ENABLED=false` 无法阻止操作，且绕过安全校验
+
+位置：`modules/replication/config.go:76`、`control_server.go:280`、`restore.go:593`、`:676`。
+
+禁用配置直接返回，跳过监听地址、HTTPS、服务名、token 长度和超时等校验。但 `ServeControl`、`RestoreLatest`、`EnsurePrimaryService` 没有一致检查 `Enabled`。其中控制服务只再次检查 token 长度，恢复仅检查 token 非空。
+
+模拟服务探针配置 `ENABLED=false`、`CONTROL_LISTEN=0.0.0.0:3001`、`GITEA_SERVICE_NAME=other.service`，配置加载成功，`EnsurePrimaryService` 实际调用了模拟的 `systemctl start other.service`。结合 `ServeControl` 使用配置地址监听的代码，可确认禁用状态也能绕过仅允许 loopback 的约束。restore 分支也可能在禁用状态下使用未验证的远程明文 URL；本轮未向远端发请求。
+
+建议：所有执行入口在副作用前统一拒绝禁用配置；若明确设计 CLI 可以覆盖禁用状态，则必须执行同样的完整校验，并明确其契约。`ensure-primary` 需要保留已存在故障检查点的安全恢复语义，不能因修改禁用状态而留下无法恢复的停机。
+
+### R05：读请求的认证流程仍会修改数据
+
+位置：`services/auth/basic.go:145`、`:174`、`services/auth/source/db/authenticate.go:56`、`services/auth/reverseproxy.go:53`、`:120`、`:167`。
+
+只读中间件允许普通 GET/HEAD 和 Git fetch POST 继续进入认证。Basic 密码认证继续调用 `UserSignIn`；数据库认证在哈希算法或盐长度过旧时更新密码字段，TOTP 验证会消费验证码。反向代理认证可能自动创建用户，创建会话时还可能更新用户语言。上述路径没有对应的 replication 写保护检查。LDAP 认证中的更新也需要纳入同一审查。
+
+触发条件包括允许 Basic 密码认证且用户密码需要迁移，或启用了反向代理自动注册。结果是备用数据库偏离主节点，并使「只读期间不登录、不写入」的承诺失效。现有对 PAT 使用时间、OAuth token 和仓库懒写入的保护不能覆盖这些路径。本轮确认调用链，尚未使用真实数据库做认证集成复现。
+
+建议：认证层提供明确的只读策略；已有用户的无副作用验证可以保留，注册、密码迁移、会话建立和验证码消费需要拒绝或显式处理。测试应断言用户表、token/2FA 状态和会话均未变化，而不只是检查 HTTP 状态码。
+
+### R06：备用节点的 SSH 功能缺口
+
+位置：`modules/replication/read_only.go:96`、`routers/private/internal.go:76`、`routers/private/key.go:16`、`cmd/serv.go:373`。
+
+正常路由的只读中间件覆盖 `/api/internal`。以下 POST 均返回 503：`/ssh/authorized_keys`、`/ssh/{id}/update/{repoid}`、`/ssh/log`。动态 `AuthorizedKeysCommand` 查找依赖第一个接口；Git 命令结束后更新 key 活跃时间依赖第二个接口，失败会传回 `gitea serv`。因此动态授权可能直接失败，使用已有 authorized_keys 的读取也可能在 Git 执行后报错。
+
+建议：将内部 SSH 的只读查询与实际写入分开。对受内部 token 认证的纯查询开放，对只读模式的活跃时间更新返回明确的成功但不写入；日志策略单独处理。不能无条件开放全部内部 API，否则会暴露 hook、管理和其他写接口。验收包括内置 SSH、OpenSSH 静态 keys、动态 AuthorizedKeysCommand、clone/fetch 和 push 拒绝。
+
+### R07：慢响应写入占满服务槽位
+
+位置：`control_server.go:464`、`incremental_server.go:1316`、`control_server.go:1436`。
+
+服务端没有 `WriteTimeout`，chunk handler 持有并发槽直到 `w.Write` 返回。八个阻塞 writer 可以占满全部槽位，第九个请求返回 503。handler 在写入前已释放 `chunkMu`，因此不能据此声称它阻塞了主节点恢复锁；已确认的影响是 chunk 服务容量和相关内存被长期占用。
+
+认证和代理 IP 白名单降低攻击面，但慢备份客户端仍可触发。Nginx 示例的 24 小时写超时也使限制过宽。
+
+建议：设置响应写入的空闲超时或合适的逐响应 deadline，同时限制 manifest 并发编码。避免用过短的全局绝对超时截断合法大 manifest。验收需要真实 TCP 慢读、连接断开、context 取消、HTTP/1.1 与 HTTP/2；当前阻塞 writer 探针只证明槽位生命周期。
+
+### R08：最终扫描可长时间保持主节点停机
+
+位置：`incremental_server.go:644`、`:670`、`:732`、`config.go:54`。
+
+停主后最终扫描使用默认 24 小时的 `SNAPSHOT_TIMEOUT`。`FINAL_SESSION_TIMEOUT` 默认 5 分钟，计时从扫描、签名、持久化及 chunk 索引全部完成之后才开始。它不约束此前的停机；目录扫描、磁盘故障或高 churn 大文件重分块可以拖长停机。
+
+建议：设置覆盖 stop、final scan、签名、索引和传输的总停机预算；在线预检阶段完成容量及成本估计，超过预算时恢复主节点。文件系统 syscall 和 fsync 本身不能仅靠 context 保证及时返回，需要单独界定卡死 I/O 的恢复策略。验收使用慢扫描和阻塞 I/O 注入，不能用会话超时测试代替扫描超时测试。
+
+### R09：缺少容量预检
+
+位置：`RestoreLatest`、`completeFinalSync`、`buildIncrementalStage`、`installPreparedSnapshotWithVerifierAndHooks`。
+
+未找到 `Statfs`、容量预留或 inode 可用量检查。恢复期间可能同时持有当前根、chunk 缓存、完整暂存树及失败副本；reflink 可减少占用，但不支持 reflink 时回退复制。最终阶段中的 ENOSPC 会增加停机和恢复成本。
+
+建议：在请求最终停机之前估计剩余 chunk、非 reflink 暂存数据、元数据和保留副本所需空间，检查 inode 与文件系统可用量，保留安全余量并持续监控。预检不能保证后续无 ENOSPC，仍需故障恢复测试。不得为了释放空间删除唯一可信根或仍需恢复的检查点。本轮未使用磁盘填满、quota 或故障文件系统进行验证。
+
+### R10：基线测试失效
+
+默认包测试失败 16 个顶层测试（另有安装测试子用例失败）。JSON v1 构建仍失败 15 个顶层测试。主要原因包括 R01、缺少 format 5 必需的 token 指纹、OAuth2 signing key 默认路径不在临时根中、缺少配置 provider，以及回滚安全行为与旧期望不一致。
+
+使用临时 overlay 仅补齐夹具后，增量最终扫描、按变更文件扫描、周期全量扫描和预扫描复用四项测试通过。HTTP round trip 进入安装校验后暴露 R03；未将其记为通过。旧 `.json.tmp` 清理测试要求 prune 执行清理，而现代码将临时文件清理放在独立入口，需重新确认测试契约。
+
+建议：先修复夹具隔离与断言，再补真实 SQLite（包括 WAL）和 Git 仓库测试。当前 HTTP 测试写入的是模拟数据库字符串，无法证明数据库事务一致性。新增测试应针对状态转换不变量和故障后可恢复性，而不是复刻函数实现。
+
+### R11：部署与操作文档不足
+
+`custom/conf/app.example.ini` 和 `docs` 中没有 replication 配置说明。已有 CLI 与 contrib 服务示例不足以说明支持范围、共享与节点独有 secrets、同版本要求、路径和文件系统要求、RPO/RTO、恢复检查点、密钥再生成失败、备份验证，以及主节点隔离后的提升步骤。
+
+建议：补全配置参考、部署与恢复手册；明确 Linux、SQLite、本地存储、单 mount tree、相同路径/版本及原子交换要求。提升应要求明确确认旧主隔离，并停止 restore timer；当前没有独立的自动仲裁与 fencing 协议，不应宣传自动无损故障切换。记录 `status` 和 health 只反映控制面的哪些状态，并提供最后成功安装时间和数据新鲜度的诊断方法。
+
+## 基线性能测量与优化方向
+
+固定数据：1 万个唯一的小文件（总内容 130,000 字节）；另分别测试 256 MiB 可压缩数据、固定种子的独立伪随机数据和稀疏零文件。在本机临时文件系统、热缓存条件下运行，以下是单次观测，不是生产吞吐承诺。
+
+| 扫描阶段 | 耗时 | 内容复用情况 | manifest JSON / gzip 字节 |
+| --- | --- | --- | --- |
+| 首次 | 87.37 ms | 分块 10,000 个文件 | 2,540,137 / 462,794 |
+| 无变更 | 37.62 ms | 复用 10,000 个文件 | 2,540,137 / 462,794 |
+| 修改 1% | 36.45 ms | 复用 9,900 个，分块 100 个 | 2,540,037 / 459,696 |
+| 重命名一个、删除一个 | 35.50 ms | 复用 9,998 个，分块 1 个 | 2,539,785 / 459,835 |
+
+manifest 数字由实际编码及 gzip handler 输出测得，但探针未添加生产 ID、签名和实例身份字段的完整值，生产大小会略有不同。无变更的扫描节省内容读取，却仍编码完整文件列表。对于大量小文件，此数据集的 gzip manifest 已超过全部文件内容大小，值得优先评估增量 manifest 和不变树短路。
+
+| 256 MiB 文件类型 | 分块与编码耗时 | 块数 | 所有块分别编码后的总字节 |
+| --- | --- | --- | --- |
+| 可压缩 | 504.37 ms | 64 | 270,720 |
+| 不可压缩伪随机 | 556.80 ms | 198 | 268,435,456 |
+| 稀疏零文件 | 304.72 ms | 64 | 0（零块跳过） |
+
+这些编码字节不是实际网络传输量：可压缩文件存在重复块，实际按哈希去重还会进一步减少传输；未计 HTTP/TLS、manifest 和请求开销。稀疏文件仍执行逻辑内容分块与哈希，未证明扫描能跳过 hole。内容定义分块在已有 8 MiB 插入测试中成功复用部分块。
+
+单独运行探针二进制的整个性能用例耗时 2.02 s，CPU user 1.68 s、system 0.56 s，最大 RSS 45,268 KiB。`time` 报告文件系统输出 1,129,384 个 512 字节块，包含创建测试数据的开销；不能将该数值解释为 replication 本身的写放大。编译开销已排除。真实双节点的网络字节、请求数、主节点停机时间、生产规模 RSS 和峰值空间尚未测得，当前端到端路径受 R01/R03 阻断。
+
+建议依次优化：
+
+1. 固定 codec 后减少重复的完整 manifest 编码、校验与磁盘加载；测量大 manifest 的峰值 RSS 和并发放大。
+2. 为无变更树提供可信的短路或增量 manifest。必须保留周期全量验证及崩溃后基线校验，不能仅信任 mtime。
+3. 对小文件进行有界批量 chunk 请求，减少 RTT。限制请求体、总响应大小和单项错误的重试范围。
+4. 使用 `SEEK_DATA`/`SEEK_HOLE` 优化稀疏扫描，保留不支持该能力时的正确回退，块哈希须保持一致。
+5. 测量 reflink 与复制回退、每文件 fsync、缓存重复落盘的成本，再决定并发和持久化策略。减少 fsync 必须同时给出断电恢复保证。
+
+## 基线覆盖矩阵与修复后仍待验证的风险
+
+下表的“隔离验证结果”记录本报告针对原始基线执行时的结果，不是本次修复后的测试状态；修复后的代码验证见前文“修复状态与验证”。
+
+| 路径 | 代码审核 | 隔离验证结果 | 剩余缺口 |
+| --- | --- | --- | --- |
+| 配置、角色、入口副作用 | 已检查 | 禁用配置漏洞复现 | 控制 listener 与明文 restore 的真实网络复现 |
+| manifest 大小、尾随数据、签名、版本 | 已检查 | JSON v1/v2、跨构建验证；原包测试失败已分类 | 大条目与批量编码完全一致性、256 MiB 上限压测 |
+| 分块、零块、插入复用、缓存损坏 | 已检查 | 插入、阶段构建、损坏缓存及性能用例通过 | 大文件插入/删除/重命名的真实传输统计 |
+| 首次/增量/全量预扫描 | 已检查 | 修复临时夹具后四项扫描用例通过 | 同时高 churn 的预扫描重试及生产规模成本 |
+| 网络重试、截断与篡改 | 已检查 | 基线与 codec 探针揭示阻断，JSON v1 的完整尾部截断用例通过 | 响应丢失、gzip 损坏、慢读真实 TCP 矩阵 |
+| 最终会话与主节点恢复 | 已检查 | 瞬时启动失败恢复、会话过期恢复和 SSH fence 用例通过 | 各持久化点的进程崩溃/重启注入、总停机预算 |
+| 暂存、安装、回滚、ready | 已检查 | R03 复现；回滚夹具旧期望已识别 | 每个检查点 crash、ENOSPC、fsync 错误、交换结果不明矩阵 |
+| 并发恢复/控制进程 | 已检查文件锁与启动恢复顺序 | 现有 SSH fence 并发用例通过 | 多进程并发 restore、锁文件被替换和控制重启专项 |
+| HTTP/SSH/认证 | 已检查公开及内部路由 | 内部 POST 拦截复现 | 真数据库认证、三种 SSH 部署、包与 LFS 下载集成 |
+| 队列、cron、incoming mail、索引 | 已检查调用入口 | 相关包源码审查；本轮未启动真实 worker | 运行中检查点出现、取消 drain、Bleve 与远程索引组合 |
+| systemd/Polkit/Nginx | 已检查 | `systemd-analyze verify` 执行，因 `/usr/local/bin/gitea` 不存在返回失败 | 真实服务沙箱、权限、反代及提升演练 |
+
+已运行六个选择性用例的 `-race`：内容定义分块插入、暂存复用/删除、损坏缓存、主节点瞬时恢复、最终会话超时和 SSH fence；全部通过，耗时 1.422 s。该结果不覆盖整个包或全部 worker 的并发行为。
+
+尚不能确认为缺陷的安全与完整性风险：
+
+- root helper 校验路径后用路径执行 `Renameat2`，仍需在攻击者能替换目录的明确权限模型下验证 TOCTOU；不得把仅存在时间窗口直接写成可利用的提权漏洞。配置、二进制、unit 和父目录应由部署保证可信。
+- 文件打开使用 `openat2`/逐级 `openat`、`O_NOFOLLOW` 和文件身份检查，已看到针对路径穿越和符号链接的保护；仍需注入父目录交换、hardlink 和 mount 变化确认保护闭合。
+- manifest 保存模式和内容，没有完整表达 UID/GID、ACL、xattr。需要明确单用户部署限制；含特殊权限或额外元数据的部署要单独验证。
+- 不支持远程数据库、远程对象存储、多 mount tree 是当前设计限制；仓库归档和索引属于可再生成数据，其再生能力及只读下载体验需要验证，不能据「未复制」直接判定数据丢失。
+- Unix/FCGI 的 readiness 仅依赖 systemd active，HTTP readiness 不验证服务实例身份，也会接受已收到的 200 而忽略响应体错误。需要定义实际可用性的验收条件。
+- 快照签名依赖共享 control token，不能对持有该 token 的恶意主节点提供内容真实性隔离。提升仲裁与旧主隔离仍由操作者负责。
+
+## 已完成的批量修复分组
+
+### 第一组：manifest、安装和恢复可靠性
+
+修复 R01–R04、R07–R09，并为 JSON 兼容、节点本地文件、禁用入口、超时预算和磁盘预检补充回归测试。
+
+### 第二组：只读边界和测试夹具
+
+修复 R05–R06、R10，覆盖认证期间可能发生的用户/会话写入、SSH 内部路由白名单及原包测试夹具。
+
+### 第三组：运维文档
+
+修复 R11，补充配置示例、部署与恢复流程、备份要求及数据新鲜度检查。
+
+以上分组各自独立提交。复用原性能数据作为优化基线；manifest 增量、批量请求、稀疏扫描和 reflink/fsync 优化需要生产规模数据后再决策。
+
+## 重复运行
+
+```sh
+python3 contrib/replication-audit/run.py
+python3 contrib/replication-audit/run.py --baseline --fixtures --perf
+```
+
+脚本针对原始审核基线，在临时目录生成 Go overlay、测试二进制和日志，不改业务源码；其中 `nojsonv2` codec 探针仅适用于尚未切换到 v28 `modules/json` 的基线构建。性能统计需要 `/usr/bin/time`。所有服务操作均由探针或既有测试的 mock 接管，不启动真实 Gitea 或 systemd unit。默认执行 codec、安全和配置目录探针；可选执行原包基线、临时夹具修复后的集成用例及性能测量。
+
+这些探针是针对基线缺陷的审核诊断工具，部分断言明确期望缺陷出现；在修复版本上运行时，相关缺陷探针预期会失败，探针 PASS 不代表产品通过验收。产品回归覆盖位于 `modules/replication` 及认证/私有路由包测试中。脚本打印每项退出码，并在执行命令失败时返回非零。
+
+原始精简证据位于 [evidence](evidence)。默认包的逐测试结果保存在 `baseline.json`；本机临时 HTTP、systemd 和完整日志仍在 `/tmp/replication-audit-*`。本次修复未修改 `go.mod` 或服务 unit 文件。

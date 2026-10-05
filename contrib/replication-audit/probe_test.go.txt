@@ -1,0 +1,304 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+package replication
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"math/rand"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"gitea.dev/modules/json"
+	"gitea.dev/modules/setting"
+)
+
+func TestAuditCodec(t *testing.T) {
+	for _, name := range []string{"plain", "a<b&c"} {
+		m := &SnapshotManifest{Snapshot: Snapshot{ID: "20260101T000000.000000000Z", State: "preflight", CreatedAt: time.Unix(1, 0), RootMode: 0700}, FormatVersion: incrementalFormatVersion, GeneralTokenSecretFingerprint: strings.Repeat("0", 64), Files: []TreeEntry{{Path: name, Type: "file", Mode: 0600}}, FileCount: 1}
+		if err := signIncrementalManifest(m, "token"); err != nil {
+			t.Fatal(err)
+		}
+		var b bytes.Buffer
+		if err := writeManifestJSONContext(context.Background(), &b, m, false); err != nil {
+			t.Fatal(err)
+		}
+		var decoded SnapshotManifest
+		diskErr := decodeManifestJSON(bytes.NewReader(b.Bytes()), &decoded)
+		_, netErr := decodeManifestResponse(bytes.NewReader(b.Bytes()))
+		if dir := os.Getenv("REPLICATION_AUDIT_CODEC_DIR"); dir != "" {
+			path := filepath.Join(dir, name+".json")
+			if data, err := os.ReadFile(path); err == nil {
+				var foreign SnapshotManifest
+				if err = json.Unmarshal(data, &foreign); err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("cross-build name=%s signature-valid=%t validation=%v", name, verifyIncrementalSignature(&foreign, "token"), validateIncrementalManifest(&foreign))
+			} else if os.IsNotExist(err) {
+				if err = os.WriteFile(path, b.Bytes(), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Fatal(err)
+			}
+		}
+		t.Logf("name=%s digest=%s disk=%v network=%v wire=%s", name, m.SHA256, diskErr, netErr, b.String())
+	}
+}
+
+func TestAuditScanPerf(t *testing.T) {
+	root := t.TempDir()
+	old := setting.AppWorkPath
+	setting.AppWorkPath = root
+	defer func() { setting.AppWorkPath = old }()
+	for i := 0; i < 10000; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%05d", i)), []byte(fmt.Sprintf("payload-%05d", i)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var previous *SnapshotManifest
+	for _, phase := range []string{"first", "unchanged", "one-percent", "rename-delete"} {
+		if phase == "one-percent" {
+			for i := 0; i < 100; i++ {
+				if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%05d", i)), []byte("changed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if phase == "rename-delete" {
+			if err := os.Rename(filepath.Join(root, "f00100"), filepath.Join(root, "renamed")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(root, "f00101")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		started := time.Now()
+		m, err := scanIncrementalTreeWithOptions(context.Background(), root, previous, previous == nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("phase=%s elapsed=%s files=%d size=%d", phase, time.Since(started), len(m.Files), m.Size)
+		var encoded bytes.Buffer
+		if err := writeManifestJSONContext(context.Background(), &encoded, m, false); err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/manifest", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		writeManifestMaybeGzip(w, req, m)
+		t.Logf("phase=%s manifest_json_bytes=%d manifest_gzip_bytes=%d", phase, encoded.Len(), w.Body.Len())
+		previous = m
+	}
+	for _, kind := range []string{"compressible", "random", "sparse"} {
+		path := filepath.Join(t.TempDir(), kind)
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := bytes.Repeat([]byte("abcd"), 1<<18)
+		if kind == "random" {
+			data = deterministicBytes(1 << 20)
+		}
+		if kind == "sparse" {
+			err = f.Truncate(256 << 20)
+		} else {
+			rng := rand.New(rand.NewSource(42))
+			for i := 0; i < 256 && err == nil; i++ {
+				if kind == "random" {
+					_, err = rng.Read(data)
+				}
+				if err == nil {
+					_, err = f.Write(data)
+				}
+			}
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		chunks, err := splitFile(context.Background(), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var zero, encoded int64
+		for _, c := range chunks {
+			if c.Zero {
+				zero += c.Size
+			}
+			if kind != "sparse" {
+				chunk, err := readChunk(filepath.Dir(path), chunkLocation{Path: kind, Offset: c.Offset, Size: c.Size}, c.Hash)
+				if err != nil {
+					t.Fatal(err)
+				}
+				gz, ok := gzipChunk(chunk, false)
+				if ok {
+					encoded += int64(gz.Len())
+					releaseChunkGzipBuffer(gz)
+				} else {
+					encoded += int64(len(chunk))
+				}
+			}
+		}
+		t.Logf("kind=%s elapsed=%s logical=%d chunks=%d zero=%d encoded_all_chunks=%d", kind, time.Since(started), 256<<20, len(chunks), zero, encoded)
+	}
+}
+
+func TestAuditSafety(t *testing.T) {
+	oldProvider, oldRunner, oldReady := setting.CfgProvider, systemctlRunner, readinessCheck
+	defer func() { setting.CfgProvider = oldProvider; systemctlRunner = oldRunner; readinessCheck = oldReady }()
+	p, err := setting.NewConfigProviderFromData("[replicate]\nENABLED=false\nMODE=primary\nCONTROL_LISTEN=0.0.0.0:3001\nGITEA_SERVICE_NAME=other.service\nCONTROL_TOKEN=" + strings.Repeat("x", 32) + "\nSNAPSHOT_DIR=" + t.TempDir() + "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setting.CfgProvider = p
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("disabled enabled=%t listen=%s service=%s accepted", cfg.Enabled, cfg.ControlListen, cfg.GiteaServiceName)
+	called := false
+	systemctlRunner = func(_ context.Context, action, service string) error {
+		called = true
+		t.Logf("mock systemctl %s %s", action, service)
+		return nil
+	}
+	readinessCheck = func(context.Context, string) error { return nil }
+	if err = EnsurePrimaryService(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("expected baseline to call systemctl")
+	}
+	for _, path := range []string{"/api/internal/ssh/authorized_keys", "/api/internal/ssh/1/update/1", "/api/internal/ssh/log"} {
+		forwarded := false
+		h := ReadOnlyMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { forwarded = true }))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, nil))
+		t.Logf("SSH path=%s status=%d forwarded=%t", path, w.Code, forwarded)
+	}
+}
+
+func auditFixture(t *testing.T) {
+	old, provider := setting.OAuth2.Enabled, setting.CfgProvider
+	setting.OAuth2.Enabled = false
+	if provider == nil {
+		p, err := setting.NewConfigProviderFromData("[replicate]\nENABLED=false\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		setting.CfgProvider = p
+	}
+	t.Cleanup(func() { setting.OAuth2.Enabled = old; setting.CfgProvider = provider })
+}
+func auditSignManifest(m *SnapshotManifest, token string) error {
+	m.GeneralTokenSecretFingerprint = generalTokenSecretFingerprint(token)
+	return signIncrementalManifest(m, token)
+}
+
+type auditBlockedWriter struct {
+	header  http.Header
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (w *auditBlockedWriter) Header() http.Header { return w.header }
+func (w *auditBlockedWriter) WriteHeader(int)     {}
+func (w *auditBlockedWriter) Write(p []byte) (int, error) {
+	w.entered <- struct{}{}
+	<-w.release
+	return len(p), nil
+}
+func TestAuditSlowChunk(t *testing.T) {
+	root := t.TempDir()
+	old := setting.AppWorkPath
+	setting.AppWorkPath = root
+	defer func() { setting.AppWorkPath = old }()
+	if err := os.WriteFile(filepath.Join(root, "data"), deterministicBytes(4<<20), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := scanIncrementalTree(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ID = "20260101T000000.000000000Z"
+	m.State = "preflight"
+	s := &controlServer{dataRoot: root, resolvedRoot: root, jobs: map[string]*Snapshot{m.ID: &m.Snapshot}}
+	if err = s.setTaskManifest(context.Background(), m, ""); err != nil {
+		t.Fatal(err)
+	}
+	hash := m.Files[0].Chunks[0].Hash
+	url := syncJobsPath + "/" + m.ID + "/chunks/" + hash
+	entered, release := make(chan struct{}, 8), make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, url, nil)
+			s.syncSnapshot(&auditBlockedWriter{make(http.Header), entered, release}, req)
+		}()
+	}
+	defer func() { close(release); wg.Wait() }()
+	for i := 0; i < 8; i++ {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("handler did not enter write")
+		}
+	}
+	w := httptest.NewRecorder()
+	s.syncSnapshot(w, httptest.NewRequest(http.MethodGet, url, nil))
+	t.Logf("eight blocked writes: ninth_status=%d occupied_slots=%d", w.Code, len(s.chunkSlots))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatal("expected serve slots to remain occupied")
+	}
+}
+
+func TestAuditLocalConfig(t *testing.T) {
+	root, stage := t.TempDir(), t.TempDir()
+	oldRoot, oldConf := setting.AppWorkPath, setting.CustomConf
+	defer func() { setting.AppWorkPath = oldRoot; setting.CustomConf = oldConf }()
+	setting.AppWorkPath = root
+	setting.CustomConf = filepath.Join(root, "custom", "conf", "app.ini")
+	if err := os.MkdirAll(filepath.Dir(setting.CustomConf), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(setting.CustomConf, []byte("primary-config"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(setting.CustomConf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := scanIncrementalTree(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ID = "20260101T000000.000000000Z"
+	if err = buildIncrementalStage(context.Background(), root, stage, t.TempDir(), m, nil, func(string) ([]byte, error) { t.Fatal("unexpected fetch"); return nil, nil }); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(stage, "custom", "conf", "app.ini")
+	if err = preserveLocalStandbyConfiguration(stage, conf, conf, []byte("standby-config"), info, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	setting.AppWorkPath = stage
+	setting.CustomConf = conf
+	err = verifyRestoredStandbyTree(context.Background(), stage, m)
+	t.Logf("config preserved inside APP_WORK_PATH: verification=%v", err)
+	if err == nil {
+		t.Fatal("expected baseline directory timestamp mismatch")
+	}
+}

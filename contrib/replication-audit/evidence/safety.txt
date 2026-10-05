@@ -1,0 +1,29 @@
+=== RUN   TestAuditSafety
+    replication_audit_probe_test.go:168: disabled enabled=false listen=0.0.0.0:3001 service=other.service accepted
+    replication_audit_probe_test.go:172: mock systemctl start other.service
+2026/10/03 19:12:58 .../replication/restore.go:602:EnsurePrimaryService() [I] Ensuring primary Gitea service is running: service=other.service
+    replication_audit_probe_test.go:187: SSH path=/api/internal/ssh/authorized_keys status=503 forwarded=false
+    replication_audit_probe_test.go:187: SSH path=/api/internal/ssh/1/update/1 status=503 forwarded=false
+2026/10/03 19:12:58 .../replication/restore.go:623:EnsurePrimaryService() [I] Ensured primary Gitea service is ready: service=other.service readiness_duration=340ns checkpoint_cleanup_duration=3.660755ms total_duration=3.739559ms
+2026/10/03 19:12:58 .../replication/read_only.go:46:writeReplicaReadOnlyResponse() [W] Rejected replica request while read-only: method=POST path=/api/internal/ssh/authorized_keys remote=192.0.2.1:1234
+2026/10/03 19:12:58 .../replication/read_only.go:46:writeReplicaReadOnlyResponse() [W] Rejected replica request while read-only: method=POST path=/api/internal/ssh/1/update/1 remote=192.0.2.1:1234
+    replication_audit_probe_test.go:187: SSH path=/api/internal/ssh/log status=503 forwarded=false
+2026/10/03 19:12:58 .../replication/read_only.go:46:writeReplicaReadOnlyResponse() [W] Rejected replica request while read-only: method=POST path=/api/internal/ssh/log remote=192.0.2.1:1234
+--- PASS: TestAuditSafety (0.00s)
+=== RUN   TestAuditSlowChunk
+2026/10/03 19:12:58 .../replication/incremental.go:1102:scanIncrementalTreeWithProgressForTaskAndDigest() [I] Replication tree scan completed: snapshot=local entries_seen=1 files_seen=1 files_completed=1 reused_files=0 chunked_files=1 logical_file_bytes=4194304 content_bytes_chunked=4194304 verify_all=true duration=6.438253ms
+2026/10/03 19:12:58 .../replication/control_server.go:943:(*controlServer).setTaskManifest() [I] Indexed replication manifest chunks: snapshot=20260101T000000.000000000Z state=preflight index_kind=full index_entries=4 base_snapshot= alternate_hashes=0 duration=9.819µs
+    replication_audit_probe_test.go:261: eight blocked writes: ninth_status=503 occupied_slots=8
+2026/10/03 19:12:58 .../incremental_server.go:1319:(*controlServer).syncSnapshot() [W] Rejected replication chunk request because concurrent serve limit was reached: snapshot=20260101T000000.000000000Z hash=232a11f2a29f5641eb3cf25d9740ccaebda22b949c7ef0a5dc57f2ec40dc67b7 limit=8
+--- PASS: TestAuditSlowChunk (0.02s)
+=== RUN   TestAuditLocalConfig
+2026/10/03 19:12:58 .../replication/incremental.go:947:scanIncrementalTreeWithProgressForTaskAndDigest.4() [I] Excluded node-local entry from replication snapshot: snapshot=local kind=node-local configuration path=custom/conf/app.ini
+2026/10/03 19:12:58 .../replication/incremental.go:1102:scanIncrementalTreeWithProgressForTaskAndDigest() [I] Replication tree scan completed: snapshot=local entries_seen=3 files_seen=0 files_completed=0 reused_files=0 chunked_files=0 logical_file_bytes=0 content_bytes_chunked=0 verify_all=true duration=197.015µs
+2026/10/03 19:12:58 .../incremental_client.go:3423:buildIncrementalStage() [I] Captured staging file identities: snapshot=20260101T000000.000000000Z files=0
+2026/10/03 19:12:58 .../incremental_client.go:3427:buildIncrementalStage() [I] Built incremental staging tree: snapshot=20260101T000000.000000000Z files_stage_reused=0 stage_files_reflinked=0 stage_files_copied=0 files_reflinked_from_baseline=0 files_copied_from_baseline=0 baseline_copy_bytes=0 files_rebuilt=0 zero_chunks_skipped=0 zero_bytes_skipped=0 chunks_from_memory_cache=0 memory_cache_payload_bytes=0 chunks_from_cache=0 cache_payload_bytes=0 chunks_from_local_baseline=0 local_payload_bytes=0 indexed_local_candidate_attempts=0 indexed_local_candidate_failures=0 previous_manifest_candidate_attempts=0 previous_manifest_candidate_failures=0 chunks_fetched_on_demand=0 fetched_payload_bytes=0 duration=144.412µs
+2026/10/03 19:12:58 .../replication/incremental.go:947:scanIncrementalTreeWithProgressForTaskAndDigest.4() [I] Excluded node-local entry from replication snapshot: snapshot=20260101T000000.000000000Z kind=node-local configuration path=custom/conf/app.ini
+2026/10/03 19:12:58 .../replication/incremental.go:1102:scanIncrementalTreeWithProgressForTaskAndDigest() [I] Replication tree scan completed: snapshot=20260101T000000.000000000Z entries_seen=3 files_seen=0 files_completed=0 reused_files=0 chunked_files=0 logical_file_bytes=0 content_bytes_chunked=0 verify_all=false duration=143.591µs
+    replication_audit_probe_test.go:298: config preserved inside APP_WORK_PATH: verification=verify restored standby tree: manifest entry differs: expected_path="custom/conf" actual_path="custom/conf" type=false mode=false size=false mtime=true link_target=false chunks=false
+--- PASS: TestAuditLocalConfig (0.00s)
+PASS
+ok  	gitea.dev/modules/replication	0.031s
