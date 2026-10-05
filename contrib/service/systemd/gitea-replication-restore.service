@@ -9,7 +9,7 @@ RequiresMountsFor=/var/lib/gitea /var/lib/gitea-replication
 # start timeout; Type=simple reports start as soon as the worker is spawned.
 Type=simple
 Restart=on-failure
-RestartSec=5min
+RestartSec=30min
 User=git
 Group=git
 Environment=USER=git HOME=/home/git GITEA_WORK_DIR=/var/lib/gitea

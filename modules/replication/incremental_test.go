@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -1099,5 +1100,38 @@ func TestChunkFetchUsesBatchEndpointForSmallChunks(t *testing.T) {
 	}
 	if batchCalls.Load() != 1 || singleCalls.Load() != int64(len(hashes)) {
 		t.Fatalf("expected one failed batch and %d single requests: batch=%d single=%d", len(hashes), batchCalls.Load(), singleCalls.Load())
+	}
+}
+
+func TestFinalPlanDownloadsChunksOnlyAvailableInRewrittenFiles(t *testing.T) {
+	oldWorkPath, oldVersion := setting.AppWorkPath, setting.AppVer
+	t.Cleanup(func() { setting.AppWorkPath, setting.AppVer = oldWorkPath, oldVersion })
+	root := t.TempDir()
+	setting.AppWorkPath, setting.AppVer = root, "test"
+
+	// The standby holds the chunk of "AAA" only inside data/source, which this
+	// update rewrites: reusing that location would leave the chunk unavailable
+	// once the file is patched, so it must be scheduled for download.
+	requireWriteFile(t, filepath.Join(root, "data", "source"), "AAA")
+	requireWriteFile(t, filepath.Join(root, "data", "target"), "BBB")
+	previous := scanTreeForApplyTest(t, root)
+
+	sourceHash := sha256.Sum256([]byte("AAA"))
+	targetHash := sha256.Sum256([]byte("BBB"))
+	manifest := &SnapshotManifest{
+		Snapshot:  Snapshot{ID: "20260101T000000.000000000Z", Size: 6},
+		FileCount: 2,
+		Files: []TreeEntry{
+			{Path: "data/source", Type: "file", Size: 3, Mode: 0o600, Chunks: []ChunkDescriptor{{Hash: hex.EncodeToString(targetHash[:]), Size: 3}}},
+			{Path: "data/target", Type: "file", Size: 3, Mode: 0o600, Chunks: []ChunkDescriptor{{Hash: hex.EncodeToString(sourceHash[:]), Size: 3}}},
+		},
+	}
+	plan, err := planMissingChunks(context.Background(), manifest, previous, t.TempDir(), false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := hex.EncodeToString(sourceHash[:])
+	if !slices.Contains(plan.hashes, want) {
+		t.Fatalf("chunk %s is only available in a rewritten file but was not scheduled for download: download_chunks=%d reusable=%d", want[:12], len(plan.hashes), plan.reusable)
 	}
 }

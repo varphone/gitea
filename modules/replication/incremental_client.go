@@ -1809,6 +1809,48 @@ func previousEntryChunksLocally(ctx context.Context, root, resolvedRoot string, 
 	return chunks, afterChangeID, nil
 }
 
+// rewrittenApplyPaths lists file paths the in-place update rewrites, so chunk
+// candidates stored inside them cannot be trusted once the update starts: an
+// earlier patched file may destroy the bytes a later file still needs.
+func rewrittenApplyPaths(manifest, previous *SnapshotManifest) map[string]struct{} {
+	rewritten := make(map[string]struct{})
+	if manifest == nil {
+		return rewritten
+	}
+	baseline := make(map[string]TreeEntry)
+	if previous != nil {
+		for _, entry := range previous.Files {
+			baseline[entry.Path] = entry
+		}
+	}
+	files := make(map[string]struct{})
+	for _, entry := range manifest.Files {
+		if entry.Type != "file" {
+			if prior, ok := baseline[entry.Path]; ok && prior.Type == "file" {
+				rewritten[entry.Path] = struct{}{}
+			}
+			continue
+		}
+		files[entry.Path] = struct{}{}
+		prior, ok := baseline[entry.Path]
+		if !ok || prior.Type != "file" || prior.Size != entry.Size || prior.Mode != entry.Mode ||
+			prior.ModTimeNS != entry.ModTimeNS || prior.ChangeID != entry.ChangeID || !sameChunks(prior.Chunks, entry.Chunks) {
+			rewritten[entry.Path] = struct{}{}
+		}
+	}
+	if previous != nil {
+		for _, entry := range previous.Files {
+			if entry.Type != "file" {
+				continue
+			}
+			if _, ok := files[entry.Path]; !ok {
+				rewritten[entry.Path] = struct{}{}
+			}
+		}
+	}
+	return rewritten
+}
+
 func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest, cacheDir string, preflight bool, localCandidates map[string][]chunkLocation) (chunkFetchPlan, error) {
 	plan := chunkFetchPlan{}
 	if err := ctx.Err(); err != nil {
@@ -1856,6 +1898,26 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 		info := candidate.info
 		return info != nil && candidate.changeID == location.SourceChangeID &&
 			location.Offset <= info.Size() && location.Size <= info.Size()-location.Offset
+	}
+	rewrittenPaths := rewrittenApplyPaths(manifest, previous)
+	hardlinkedSources := make(map[string]bool)
+	unsafeSource := func(path string) bool {
+		if _, rewritten := rewrittenPaths[path]; rewritten {
+			return true
+		}
+		if value, ok := hardlinkedSources[path]; ok {
+			return value
+		}
+		info, err := os.Lstat(filepath.Join(localCandidateRoot, filepath.FromSlash(path)))
+		value := err == nil && info.Mode().IsRegular() && fileHasMultipleLinks(info)
+		hardlinkedSources[path] = value
+		return value
+	}
+	safeCandidate := func(location chunkLocation, size int64) bool {
+		if unsafeSource(location.Path) {
+			return false
+		}
+		return localCandidateAvailable(location, size)
 	}
 	var wantedFiles map[string]bool
 	if preflight {
@@ -1960,6 +2022,9 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 							}
 						}
 						if target, ok := states[chunk.Hash]; ok && target.state != chunkPlanZero && target.size == chunk.Size {
+							if unsafeSource(entry.Path) {
+								continue
+							}
 							if !localChunksMatchManifest || localChangeIDChanged {
 								if plan.localCandidates == nil {
 									plan.localCandidates = make(map[string][]chunkLocation)
@@ -2092,7 +2157,7 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 						locations := plan.localCandidates[chunk.Hash]
 						available := locations[:0]
 						for _, location := range locations {
-							if localCandidateAvailable(location, chunk.Size) {
+							if safeCandidate(location, chunk.Size) {
 								available = append(available, location)
 							} else {
 								plan.invalidatedLocalCandidates++
@@ -2102,6 +2167,9 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 							delete(plan.localCandidates, chunk.Hash)
 						} else {
 							plan.localCandidates[chunk.Hash] = available
+						}
+						if unsafeSource(entry.Path) {
+							continue
 						}
 						addLocalChunkCandidate(plan.localCandidates, chunk.Hash, chunkLocation{
 							Path: entry.Path, Offset: chunk.Offset, Size: chunk.Size, SourceChangeID: sourceChangeID,
@@ -2151,7 +2219,7 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 			}
 			if !preflight && state == chunkPlanNeeded {
 				for _, location := range localCandidates[chunk.Hash] {
-					if localCandidateAvailable(location, chunk.Size) {
+					if safeCandidate(location, chunk.Size) {
 						state = chunkPlanReusable
 						plan.indexedLocalCandidates++
 						plan.indexedLocalSize += chunk.Size
