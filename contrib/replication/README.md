@@ -285,8 +285,8 @@ outage checkpoint.
 
 The restore worker uses a non-blocking `Type=simple` unit: starting it does not
 wait for a potentially long synchronization to finish. The timer schedules the
-next run one hour after the worker exits, so a slow or retrying transfer never
-overlaps with another restore run.
+next run one hour after the worker exits, so a slow transfer never overlaps with
+another restore run; a failed run is retried after five minutes.
 
 Keep ordinary `gitea.service` on its standard
 `GITEA_WORK_DIR=/var/lib/gitea`, and keep it stopped on the standby: the restore

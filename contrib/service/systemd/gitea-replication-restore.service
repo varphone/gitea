@@ -1,15 +1,14 @@
 [Unit]
 Description=Incrementally synchronize the Gitea disaster-recovery standby
 After=network-online.target gitea-replication.service
-Wants=network-online.target
-Requires=gitea-replication.service
+Wants=network-online.target gitea-replication.service
 
 [Service]
 # The run duration is bounded by the [replicate] timeouts, not by a systemd
 # start timeout; Type=simple reports start as soon as the worker is spawned.
 Type=simple
 Restart=on-failure
-RestartSec=30s
+RestartSec=5min
 User=git
 Group=git
 Environment=USER=git HOME=/home/git GITEA_WORK_DIR=/var/lib/gitea
@@ -22,4 +21,5 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 LockPersonality=true
 RestrictSUIDSGID=true
+UMask=0077
 ExecStart=/usr/local/bin/gitea replicate restore --config /etc/gitea/app.ini

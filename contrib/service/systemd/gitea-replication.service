@@ -1,7 +1,6 @@
 [Unit]
 Description=Gitea disaster-recovery control plane
 After=network.target
-Conflicts=
 
 [Service]
 Type=simple
