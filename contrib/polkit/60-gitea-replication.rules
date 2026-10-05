@@ -1,0 +1,11 @@
+// Install as /etc/polkit-1/rules.d/60-gitea-replication.rules
+// Permit the dedicated Gitea account to manage gitea.service for primary
+// recovery and for the short fenced final consistency phase.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "gitea.service" &&
+        ["start", "stop", "restart"].indexOf(action.lookup("verb")) >= 0 &&
+        subject.user == "git") {
+        return polkit.Result.YES;
+    }
+});
