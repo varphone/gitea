@@ -386,9 +386,15 @@ func TestInPlaceApplyDeletesFromTrustedBaselineAndCleansTemps(t *testing.T) {
 	requireWriteFile(t, filepath.Join(trimmed, "data", "keep"), "keep")
 	manifest := scanTreeForApplyTest(t, trimmed)
 	requireWriteFile(t, filepath.Join(target, "data", ".replication-apply-stale"), "stale")
+	// A file that neither the baseline nor the target manifest lists, for example a
+	// queue file an interrupted earlier update created, must be removed as well.
+	requireWriteFile(t, filepath.Join(target, "data", "leftover.ldb"), "leftover")
 	stats := applyManifestForTest(t, target, cacheDir, manifest, previous, chunkFetchFromTree(t, trimmed, manifest))
 	if stats.EntriesDeleted == 0 {
-		t.Fatal("expected the trusted baseline to provide obsolete entries")
+		t.Fatal("expected obsolete entries to be deleted")
+	}
+	if _, err := os.Lstat(filepath.Join(target, "data", "leftover.ldb")); !os.IsNotExist(err) {
+		t.Fatalf("unlisted leftover file remains: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(target, "data", "drop")); !os.IsNotExist(err) {
 		t.Fatalf("obsolete directory remains: %v", err)

@@ -185,7 +185,7 @@ func applyInPlace(ctx context.Context, opts inPlaceApplyOptions) (*inPlaceApplyS
 	if err := removeStaleApplyTemps(ctx, root, directories); err != nil {
 		return nil, err
 	}
-	deleted, err := removeObsoleteEntries(ctx, root, target, opts.Previous, excluded, localOnly)
+	deleted, err := removeObsoleteEntries(ctx, root, target, excluded, localOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -408,82 +408,48 @@ func removePathForReplace(dst string) error {
 	return syncDirectory(filepath.Dir(dst))
 }
 
-// removeObsoleteEntries deletes tree entries that the target manifest does not contain. A
-// trusted previous manifest lists every installed entry, so the candidates come from it
-// without walking the whole tree; anything else falls back to a walk.
-func removeObsoleteEntries(ctx context.Context, root string, target map[string]struct{}, previous *SnapshotManifest, excluded, localOnly map[string]string) (int, error) {
+// removeObsoleteEntries deletes every tree entry the target manifest does not contain,
+// including files an interrupted earlier update or the previous staging layout left behind.
+func removeObsoleteEntries(ctx context.Context, root string, target map[string]struct{}, excluded, localOnly map[string]string) (int, error) {
 	var obsolete []string
-	if previous != nil && previous.State == "ready" {
-		ignoredPrefixes := make([]string, 0)
-		for _, entry := range previous.Files {
-			if err := ctx.Err(); err != nil {
-				return 0, err
-			}
-			if slices.ContainsFunc(ignoredPrefixes, func(prefix string) bool {
-				return strings.HasPrefix(entry.Path, prefix)
-			}) {
-				continue
-			}
-			if _, kept := target[entry.Path]; kept {
-				continue
-			}
-			if _, ignored := localOnly[entry.Path]; ignored {
-				if entry.Type == "dir" {
-					ignoredPrefixes = append(ignoredPrefixes, entry.Path+"/")
-				}
-				continue
-			}
-			if _, ignored := configuredReplicationLogEntry(entry.Path, localOnly); ignored {
-				continue
-			}
-			if _, regenerable := excluded[entry.Path]; regenerable && entry.Type != "symlink" {
-				if entry.Type == "dir" {
-					ignoredPrefixes = append(ignoredPrefixes, entry.Path+"/")
-				}
-				continue
-			}
-			obsolete = append(obsolete, entry.Path)
+	err := filepath.Walk(root, func(filePath string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-	} else {
-		err := filepath.Walk(root, func(filePath string, info os.FileInfo, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if filePath == root {
-				return nil
-			}
-			rel, err := filepath.Rel(root, filePath)
-			if err != nil {
-				return err
-			}
-			rel = filepath.ToSlash(rel)
-			if _, kept := target[rel]; kept {
-				return nil
-			}
-			if _, ignored := localOnly[rel]; ignored {
-				if info.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if _, ignored := configuredReplicationLogEntry(rel, localOnly); ignored {
-				return nil
-			}
-			if _, regenerable := excluded[rel]; regenerable && info.Mode()&os.ModeSymlink == 0 {
-				if info.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			obsolete = append(obsolete, rel)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if filePath == root {
 			return nil
-		})
-		if err != nil {
-			return 0, err
 		}
+		rel, err := filepath.Rel(root, filePath)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if _, kept := target[rel]; kept {
+			return nil
+		}
+		if _, ignored := localOnly[rel]; ignored {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if _, ignored := configuredReplicationLogEntry(rel, localOnly); ignored {
+			return nil
+		}
+		if _, regenerable := excluded[rel]; regenerable && info.Mode()&os.ModeSymlink == 0 {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		obsolete = append(obsolete, rel)
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	if len(obsolete) == 0 {
 		return 0, nil
