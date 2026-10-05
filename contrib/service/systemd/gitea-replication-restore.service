@@ -2,6 +2,7 @@
 Description=Incrementally synchronize the Gitea disaster-recovery standby
 After=network-online.target gitea-replication.service
 Wants=network-online.target gitea-replication.service
+RequiresMountsFor=/var/lib/gitea /var/lib/gitea-replication
 
 [Service]
 # The run duration is bounded by the [replicate] timeouts, not by a systemd

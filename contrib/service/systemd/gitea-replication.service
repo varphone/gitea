@@ -1,6 +1,7 @@
 [Unit]
 Description=Gitea disaster-recovery control plane
 After=network.target
+RequiresMountsFor=/var/lib/gitea /var/lib/gitea-replication
 
 [Service]
 Type=simple

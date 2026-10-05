@@ -283,6 +283,14 @@ The control unit's `TimeoutStopSec` must exceed `[replicate] SERVICE_TIMEOUT`;
 its `ExecStopPost` waits for the primary readiness check before clearing an
 outage checkpoint.
 
+`APP_WORK_PATH` and `SNAPSHOT_DIR` may live on different filesystems, including
+bind mounts from separate disks. Both units order themselves after those mounts
+with `RequiresMountsFor=`, so define them as systemd mount units (or `/etc/fstab`
+entries) rather than mounting them from an ad-hoc script: a mount that appears
+after the worker starts would shadow the tree, and the update would write to the
+underlying filesystem instead. Do not mount anything below `APP_WORK_PATH`: the
+scan requires one mount tree and refuses nested mount points.
+
 The restore worker uses a non-blocking `Type=simple` unit: starting it does not
 wait for a potentially long synchronization to finish. The timer schedules the
 next run one hour after the worker exits, so a slow transfer never overlaps with
