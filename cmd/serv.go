@@ -26,6 +26,7 @@ import (
 	"gitea.dev/modules/pprof"
 	"gitea.dev/modules/private"
 	"gitea.dev/modules/process"
+	replication "gitea.dev/modules/replication"
 	repo_module "gitea.dev/modules/repository"
 	"gitea.dev/modules/setting"
 	"gitea.dev/services/agit"
@@ -248,6 +249,13 @@ func runServ(ctx context.Context, c *cli.Command) error {
 	requestedMode, ok := getAccessMode(verb, lfsVerb)
 	if !ok {
 		return fail(ctx, "Unknown git command", "Unknown git command %s %s", verb, lfsVerb)
+	}
+	if requestedMode >= perm.AccessModeWrite {
+		release, err := replication.AuthorizeSSHWrite()
+		if err != nil {
+			return fail(ctx, err.Error(), "Replication rejected SSH write: %v", err)
+		}
+		defer release()
 	}
 
 	results, extra := private.ServCommand(ctx, keyID, reqOwnerName, reqRepoName, requestedMode, verb, lfsVerb)

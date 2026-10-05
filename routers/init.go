@@ -17,6 +17,7 @@ import (
 	"gitea.dev/modules/log"
 	"gitea.dev/modules/markup"
 	"gitea.dev/modules/markup/external"
+	replication "gitea.dev/modules/replication"
 	"gitea.dev/modules/setting"
 	"gitea.dev/modules/ssh"
 	"gitea.dev/modules/storage"
@@ -179,6 +180,7 @@ func NormalRoutes() *web.Router {
 	r.BeforeRouting(common.ProtocolMiddlewares()...)
 
 	r.AfterRouting(common.MaintenanceModeHandler())
+	r.AfterRouting(replication.WriteProtectionMiddleware)
 
 	r.Mount("/", web_routers.Routes())
 	r.Mount("/api/v1", apiv1.Routes())
