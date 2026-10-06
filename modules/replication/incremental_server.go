@@ -21,6 +21,7 @@ import (
 
 	"gitea.dev/modules/json"
 	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
 )
 
 type finalSyncSession struct {
@@ -335,6 +336,30 @@ func (s *controlServer) recoverPrimary(snapshotID, trigger string) {
 	log.Info("Restarted primary Gitea: snapshot=%s trigger=%s duration=%s", snapshotID, trigger, time.Since(started))
 }
 
+// writePreflightManifest serves a resumed preflight manifest, replacing it with a tiny
+// response when the standby base already matches and with a patch when it differs.
+func (s *controlServer) writePreflightManifest(w http.ResponseWriter, r *http.Request, manifest *SnapshotManifest) {
+	baseID := strings.TrimSpace(r.URL.Query().Get("base"))
+	if baseID == "" || !validSnapshotID(baseID) || baseID == manifest.ID {
+		writeManifestMaybeGzip(w, r, manifest)
+		return
+	}
+	base := s.loadManifestForPatch(baseID)
+	if base == nil {
+		writeManifestMaybeGzip(w, r, manifest)
+		return
+	}
+	unchanged := sameManifestContentTree(manifest, base, setting.AppWorkPath)
+	patch, err := buildManifestPatch(base, manifest)
+	if err != nil {
+		log.Warn("Cannot build preflight manifest patch: snapshot=%s base=%s error=%v", manifest.ID, baseID, err)
+		writeManifestMaybeGzip(w, r, manifest)
+		return
+	}
+	log.Info("Serving preflight manifest patch: snapshot=%s base=%s unchanged=%t changed=%d removed=%d", manifest.ID, baseID, unchanged, len(patch.Changed), len(patch.Removed))
+	writeManifestPatchMaybeGzip(w, r, patch)
+}
+
 func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost || s.cfg.Mode != modePrimary {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -379,7 +404,7 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				log.Info("Reused preflight task for retried request: snapshot=%s request_id=%s", job.ID, requestID)
-				writeManifestMaybeGzip(w, r, manifest)
+				s.writePreflightManifest(w, r, manifest)
 			default:
 				writeReplicationError(w, errorCodePreflightRequestEnded, fmt.Sprintf("preflight request has already ended in state %s: %s", job.State, job.Error))
 			}
@@ -413,7 +438,7 @@ func (s *controlServer) preflight(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Info("Resuming preflight checkpoint %s", resumeID)
-		writeManifestMaybeGzip(w, r, manifest)
+		s.writePreflightManifest(w, r, manifest)
 		return
 	}
 	id, err := s.newSnapshotIDLocked()

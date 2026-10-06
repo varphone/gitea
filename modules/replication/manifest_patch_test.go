@@ -325,3 +325,95 @@ func TestManifestPatchResponse(t *testing.T) {
 		t.Fatal("fallback body is not the full manifest")
 	}
 }
+
+func TestWritePreflightManifestShortCircuit(t *testing.T) {
+	oldRoot, oldVersion := setting.AppWorkPath, setting.AppVer
+	defer func() { setting.AppWorkPath, setting.AppVer = oldRoot, oldVersion }()
+	root := t.TempDir()
+	setting.AppWorkPath, setting.AppVer = root, "test"
+	requireWriteFile(t, filepath.Join(root, "data", "file.bin"), "content")
+
+	base, err := scanIncrementalTree(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.ID, base.State = "20260101T000000.000000000Z", "ready"
+	target, err := scanIncrementalTree(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.ID, target.State = "20260101T010000.000000000Z", "preflight"
+
+	token := "01234567890123456789012345678901"
+	snapshotDir := t.TempDir()
+	server := &controlServer{
+		cfg:           &config{Mode: modePrimary, ControlToken: token, SnapshotDir: snapshotDir},
+		jobs:          map[string]*Snapshot{},
+		taskManifests: map[string]*SnapshotManifest{base.ID: base},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, syncJobsPath+"/"+target.ID+"/manifest?base="+base.ID, nil)
+	response := httptest.NewRecorder()
+	server.writePreflightManifest(response, request, target)
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, manifestPatchContentType) {
+		t.Fatalf("unchanged snapshot content type=%q want %q", contentType, manifestPatchContentType)
+	}
+	var patch manifestPatch
+	if err := newManifestDecoder(strings.NewReader(response.Body.String())).Decode(&patch); err != nil {
+		t.Fatal(err)
+	}
+	if len(patch.Changed) != 0 || len(patch.Removed) != 0 {
+		t.Fatalf("unchanged snapshot served changed=%d removed=%d", len(patch.Changed), len(patch.Removed))
+	}
+	rebuilt, err := applyManifestPatch(base, patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := manifestDigestWithoutLocalChangeIDs(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := manifestDigestWithoutLocalChangeIDs(rebuilt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("rebuilt digest %s want %s", got, want)
+	}
+
+	requireWriteFile(t, filepath.Join(root, "data", "file.bin"), "changed")
+	changed, err := scanIncrementalTree(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed.ID, changed.State = "20260101T020000.000000000Z", "preflight"
+	response = httptest.NewRecorder()
+	server.writePreflightManifest(response, httptest.NewRequest(http.MethodGet, syncJobsPath+"/"+changed.ID+"/manifest?base="+base.ID, nil), changed)
+	if err := newManifestDecoder(strings.NewReader(response.Body.String())).Decode(&patch); err != nil {
+		t.Fatal(err)
+	}
+	if len(patch.Changed) == 0 {
+		t.Fatal("changed snapshot served an empty patch")
+	}
+	rebuilt, err = applyManifestPatch(base, patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err = manifestDigestWithoutLocalChangeIDs(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = manifestDigestWithoutLocalChangeIDs(rebuilt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("changed snapshot rebuilt digest %s want %s", got, want)
+	}
+
+	response = httptest.NewRecorder()
+	server.writePreflightManifest(response, httptest.NewRequest(http.MethodGet, syncJobsPath+"/"+changed.ID+"/manifest?base=20250101T000000.000000000Z", nil), changed)
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("unknown base content type=%q", contentType)
+	}
+}

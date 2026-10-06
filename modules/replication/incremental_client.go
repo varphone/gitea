@@ -689,13 +689,17 @@ func requestManifestWithRequestIDAndCallback(ctx context.Context, client *http.C
 	if request.Kind == "final" {
 		log.Info("Submitting final replication sync job: request_id=%s preflight=%s", request.RequestID, request.BaseJobID)
 	} else {
-		log.Info("Submitting preflight replication sync job: request_id=%s resume=%s", request.RequestID, request.ResumeJobID)
+		if baseManifest != nil && baseManifest.ID != "" {
+			request.BaseManifestID = baseManifest.ID
+		}
+		log.Info("Submitting preflight replication sync job: request_id=%s resume=%s base=%s", request.RequestID, request.ResumeJobID, request.BaseManifestID)
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
 	}
 	operation := "create sync job " + request.Kind
+	wireBaseManifest := baseManifest
 	requestStarted := time.Now()
 	busyWaits := 0
 	busyStarted := time.Time{}
@@ -780,9 +784,21 @@ func requestManifestWithRequestIDAndCallback(ctx context.Context, client *http.C
 			}
 			return nil, statusErr
 		}
-		manifest, err := decodeBoundedManifestResponse(resp)
+		manifest, err := decodeManifestOrPatchResponse(resp, wireBaseManifest, token)
 		if err != nil {
 			_ = resp.Body.Close()
+			if wireBaseManifest != nil {
+				log.Warn("Retrying %s job request without the base manifest after an unusable patch response: error=%v", request.Kind, err)
+				wireBaseManifest = nil
+				request.BaseManifestID = ""
+				retryPayload, marshalErr := json.Marshal(request)
+				if marshalErr != nil {
+					return nil, marshalErr
+				}
+				payload = retryPayload
+				attempt = 0
+				continue
+			}
 			if attempt < requestRetryLimit && shouldRetryRequestError(err) {
 				if retryErr := waitForRetry(ctx, attempt, operation, err); retryErr != nil {
 					return nil, retryErr

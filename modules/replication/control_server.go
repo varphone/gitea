@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -29,10 +30,11 @@ import (
 )
 
 type syncJobRequest struct {
-	Kind        string `json:"kind"`
-	BaseJobID   string `json:"base_job_id,omitempty"`
-	ResumeJobID string `json:"resume_job_id,omitempty"`
-	RequestID   string `json:"request_id,omitempty"`
+	Kind           string `json:"kind"`
+	BaseJobID      string `json:"base_job_id,omitempty"`
+	BaseManifestID string `json:"base_manifest_id,omitempty"`
+	ResumeJobID    string `json:"resume_job_id,omitempty"`
+	RequestID      string `json:"request_id,omitempty"`
 }
 
 const (
@@ -622,7 +624,14 @@ func (s *controlServer) syncTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		switch request.Kind {
 		case "preflight":
-			r.URL.RawQuery = "resume=" + request.ResumeJobID
+			preflightQuery := url.Values{}
+			if request.ResumeJobID != "" {
+				preflightQuery.Set("resume", request.ResumeJobID)
+			}
+			if request.BaseManifestID != "" {
+				preflightQuery.Set("base", request.BaseManifestID)
+			}
+			r.URL.RawQuery = preflightQuery.Encode()
 			r.Header.Set("Idempotency-Key", request.RequestID)
 			s.preflight(w, r)
 		case "final":
