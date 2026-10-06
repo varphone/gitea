@@ -430,8 +430,7 @@ func TestInPlaceApplyReleasesSharedCachedChunkAfterLastUse(t *testing.T) {
 	}
 	stats := applyManifestOptionsForTest(t, target, cacheDir, inPlaceApplyOptions{
 		Manifest: manifest, CacheDir: cacheDir,
-		CachedHashes: map[string]struct{}{hash: {}},
-		Fetch:        func(context.Context, string) ([]byte, error) { return nil, errors.New("fetch must not be used") },
+		Fetch: func(context.Context, string) ([]byte, error) { return nil, errors.New("fetch must not be used") },
 	})
 	if stats.ChunksFromCache+stats.ChunksReused != 2 || stats.ChunksFetched != 0 {
 		t.Fatalf("shared cached chunk was not reused for both files: from_cache=%d reused=%d fetched=%d", stats.ChunksFromCache, stats.ChunksReused, stats.ChunksFetched)
@@ -475,4 +474,41 @@ func TestInPlaceApplyPatchesReadOnlyFile(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o444 {
 		t.Fatalf("patched read-only file mode=%o want=444", got)
 	}
+}
+
+func TestInPlaceApplyFetchesSharedChunkOnce(t *testing.T) {
+	source := t.TempDir()
+	shared := strings.Repeat("s", chunkMaxSize)
+	requireWriteFile(t, filepath.Join(source, "data", "f0"), shared)
+	for i, name := range []string{"f1", "f2", "f3", "f4"} {
+		requireWriteFile(t, filepath.Join(source, "data", name), strings.Repeat(string(rune('a'+i)), chunkMaxSize))
+	}
+	requireWriteFile(t, filepath.Join(source, "data", "f5"), shared)
+	manifest := scanTreeForApplyTest(t, source)
+
+	// The shared chunk is written first and last; the four distinct 4 MiB chunks in
+	// between exceed the in-memory cache, so the last write must reuse the cache file
+	// instead of fetching the same chunk again.
+	target, cacheDir := t.TempDir(), filepath.Join(t.TempDir(), "chunks")
+	baseFetch := chunkFetchFromTree(t, source, manifest)
+	fetches := make(map[string]int)
+	stats := applyManifestOptionsForTest(t, target, cacheDir, inPlaceApplyOptions{
+		Manifest: manifest, CacheDir: cacheDir,
+		Fetch: func(ctx context.Context, hash string) ([]byte, error) {
+			fetches[hash]++
+			return baseFetch(ctx, hash)
+		},
+	})
+	if len(fetches) != 5 {
+		t.Fatalf("distinct fetched chunks=%d want=5", len(fetches))
+	}
+	for hash, count := range fetches {
+		if count != 1 {
+			t.Fatalf("chunk %s fetched %d times, want once", hash[:12], count)
+		}
+	}
+	if stats.ChunksFetched != 5 {
+		t.Fatalf("ChunksFetched=%d want=5", stats.ChunksFetched)
+	}
+	requireFileContent(t, filepath.Join(target, "data", "f5"), shared)
 }

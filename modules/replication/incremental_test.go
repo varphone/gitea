@@ -1135,3 +1135,96 @@ func TestFinalPlanDownloadsChunksOnlyAvailableInRewrittenFiles(t *testing.T) {
 		t.Fatalf("chunk %s is only available in a rewritten file but was not scheduled for download: download_chunks=%d reusable=%d", want[:12], len(plan.hashes), plan.reusable)
 	}
 }
+
+func TestIncrementalDeltaTransfersOnlyChangedChunks(t *testing.T) {
+	random := rand.New(rand.NewSource(23))
+	content := make([]byte, 8*1024*1024)
+	if _, err := random.Read(content); err != nil {
+		t.Fatal(err)
+	}
+
+	source, standby := t.TempDir(), t.TempDir()
+	sourcePath := filepath.Join(source, "data", "big.bin")
+	standbyPath := filepath.Join(standby, "data", "big.bin")
+	requireWriteFile(t, sourcePath, string(content))
+	cacheDir := filepath.Join(t.TempDir(), "chunks")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var previous *SnapshotManifest
+	sync := func(label string) (int, int64) {
+		t.Helper()
+		manifest := scanTreeForApplyTest(t, source)
+
+		oldWorkPath := setting.AppWorkPath
+		setting.AppWorkPath = standby
+		plan, err := planMissingChunks(context.Background(), manifest, previous, cacheDir, false, nil)
+		setting.AppWorkPath = oldWorkPath
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		baseFetch := chunkFetchFromTree(t, source, manifest)
+		fetched, fetchedBytes := 0, int64(0)
+		applyManifestOptionsForTest(t, standby, cacheDir, inPlaceApplyOptions{
+			Manifest: manifest, Previous: previous, CacheDir: cacheDir,
+			LocalCandidates: plan.localCandidates,
+			Fetch: func(ctx context.Context, hash string) ([]byte, error) {
+				data, err := baseFetch(ctx, hash)
+				if err != nil {
+					return nil, err
+				}
+				fetched++
+				fetchedBytes += int64(len(data))
+				return data, nil
+			},
+		})
+		if fetched != len(plan.hashes) {
+			t.Fatalf("%s: fetched %d chunks but planned %d", label, fetched, len(plan.hashes))
+		}
+		if fetchedBytes != plan.missingSize {
+			t.Fatalf("%s: fetched %d bytes but planned %d", label, fetchedBytes, plan.missingSize)
+		}
+		if err := recordLocalChangeIDs(context.Background(), standby, manifest); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%-18s chunks_transferred=%-3d payload_bytes=%-9d total_chunks=%d reusable=%d unavailable=%d skipped=%d reindex=%d file_bytes=%d", label, len(plan.hashes), plan.missingSize, plan.total, plan.reusable, plan.previousLocalFilesUnavailable, plan.previousLocalFilesSkipped, plan.localReindexAttempts, len(content))
+		previous = manifest
+		return len(plan.hashes), plan.missingSize
+	}
+
+	if chunks, payload := sync("initial full sync"); chunks == 0 || payload < int64(len(content))/2 {
+		t.Fatalf("initial sync transferred too little: chunks=%d bytes=%d", chunks, payload)
+	}
+	requireFileContent(t, standbyPath, string(content))
+
+	edit := func(offset, size int) {
+		for i := range size {
+			content[offset+i] ^= 0x5a
+		}
+		requireWriteFile(t, sourcePath, string(content))
+	}
+	for _, test := range []struct {
+		label  string
+		offset int
+	}{
+		{label: "64B at start", offset: 0},
+		{label: "64B in middle", offset: len(content) / 2},
+		{label: "64B at end", offset: len(content) - 64},
+	} {
+		edit(test.offset, 64)
+		chunks, payload := sync(test.label)
+		if chunks > 2 {
+			t.Fatalf("%s: %d chunks transferred, want at most 2", test.label, chunks)
+		}
+		if payload > 2*chunkMaxSize {
+			t.Fatalf("%s: %d bytes transferred, want at most %d", test.label, payload, 2*chunkMaxSize)
+		}
+		requireFileContent(t, standbyPath, string(content))
+	}
+
+	if chunks, payload := sync("no change"); chunks != 0 || payload != 0 {
+		t.Fatalf("unchanged tree transferred %d chunks / %d bytes", chunks, payload)
+	}
+}

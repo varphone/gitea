@@ -1809,48 +1809,6 @@ func previousEntryChunksLocally(ctx context.Context, root, resolvedRoot string, 
 	return chunks, afterChangeID, nil
 }
 
-// rewrittenApplyPaths lists file paths the in-place update rewrites, so chunk
-// candidates stored inside them cannot be trusted once the update starts: an
-// earlier patched file may destroy the bytes a later file still needs.
-func rewrittenApplyPaths(manifest, previous *SnapshotManifest) map[string]struct{} {
-	rewritten := make(map[string]struct{})
-	if manifest == nil {
-		return rewritten
-	}
-	baseline := make(map[string]TreeEntry)
-	if previous != nil {
-		for _, entry := range previous.Files {
-			baseline[entry.Path] = entry
-		}
-	}
-	files := make(map[string]struct{})
-	for _, entry := range manifest.Files {
-		if entry.Type != "file" {
-			if prior, ok := baseline[entry.Path]; ok && prior.Type == "file" {
-				rewritten[entry.Path] = struct{}{}
-			}
-			continue
-		}
-		files[entry.Path] = struct{}{}
-		prior, ok := baseline[entry.Path]
-		if !ok || prior.Type != "file" || prior.Size != entry.Size || prior.Mode != entry.Mode ||
-			prior.ModTimeNS != entry.ModTimeNS || prior.ChangeID != entry.ChangeID || !sameChunks(prior.Chunks, entry.Chunks) {
-			rewritten[entry.Path] = struct{}{}
-		}
-	}
-	if previous != nil {
-		for _, entry := range previous.Files {
-			if entry.Type != "file" {
-				continue
-			}
-			if _, ok := files[entry.Path]; !ok {
-				rewritten[entry.Path] = struct{}{}
-			}
-		}
-	}
-	return rewritten
-}
-
 func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest, cacheDir string, preflight bool, localCandidates map[string][]chunkLocation) (chunkFetchPlan, error) {
 	plan := chunkFetchPlan{}
 	if err := ctx.Err(); err != nil {
@@ -1899,22 +1857,31 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 		return info != nil && candidate.changeID == location.SourceChangeID &&
 			location.Offset <= info.Size() && location.Size <= info.Size()-location.Offset
 	}
-	rewrittenPaths := rewrittenApplyPaths(manifest, previous)
-	hardlinkedSources := make(map[string]bool)
-	unsafeSource := func(path string) bool {
-		if _, rewritten := rewrittenPaths[path]; rewritten {
-			return true
+	// The update rewrites files in place, so a candidate location is only trustworthy
+	// when the file still holds that exact chunk at that offset afterwards; otherwise an
+	// earlier patched file could destroy bytes a later file still needs.
+	newChunks := make(map[string]map[int64]ChunkDescriptor)
+	for i := range manifest.Files {
+		entry := &manifest.Files[i]
+		if entry.Type != "file" || len(entry.Chunks) == 0 {
+			continue
 		}
-		if value, ok := hardlinkedSources[path]; ok {
-			return value
+		byOffset := make(map[int64]ChunkDescriptor, len(entry.Chunks))
+		for _, chunk := range entry.Chunks {
+			byOffset[chunk.Offset] = chunk
 		}
-		info, err := os.Lstat(filepath.Join(localCandidateRoot, filepath.FromSlash(path)))
-		value := err == nil && info.Mode().IsRegular() && fileHasMultipleLinks(info)
-		hardlinkedSources[path] = value
-		return value
+		newChunks[entry.Path] = byOffset
 	}
-	safeCandidate := func(location chunkLocation, size int64) bool {
-		if unsafeSource(location.Path) {
+	candidateSurvives := func(path string, offset, size int64, hash string) bool {
+		byOffset, ok := newChunks[path]
+		if !ok {
+			return false
+		}
+		chunk, ok := byOffset[offset]
+		return ok && chunk.Hash == hash && chunk.Size == size
+	}
+	safeCandidate := func(location chunkLocation, size int64, hash string) bool {
+		if !candidateSurvives(location.Path, location.Offset, location.Size, hash) {
 			return false
 		}
 		return localCandidateAvailable(location, size)
@@ -2022,7 +1989,7 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 							}
 						}
 						if target, ok := states[chunk.Hash]; ok && target.state != chunkPlanZero && target.size == chunk.Size {
-							if unsafeSource(entry.Path) {
+							if !candidateSurvives(entry.Path, chunk.Offset, chunk.Size, chunk.Hash) {
 								continue
 							}
 							if !localChunksMatchManifest || localChangeIDChanged {
@@ -2157,7 +2124,7 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 						locations := plan.localCandidates[chunk.Hash]
 						available := locations[:0]
 						for _, location := range locations {
-							if safeCandidate(location, chunk.Size) {
+							if safeCandidate(location, chunk.Size, chunk.Hash) {
 								available = append(available, location)
 							} else {
 								plan.invalidatedLocalCandidates++
@@ -2168,7 +2135,7 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 						} else {
 							plan.localCandidates[chunk.Hash] = available
 						}
-						if unsafeSource(entry.Path) {
+						if !candidateSurvives(entry.Path, chunk.Offset, chunk.Size, chunk.Hash) {
 							continue
 						}
 						addLocalChunkCandidate(plan.localCandidates, chunk.Hash, chunkLocation{
@@ -2219,7 +2186,7 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 			}
 			if !preflight && state == chunkPlanNeeded {
 				for _, location := range localCandidates[chunk.Hash] {
-					if safeCandidate(location, chunk.Size) {
+					if safeCandidate(location, chunk.Size, chunk.Hash) {
 						state = chunkPlanReusable
 						plan.indexedLocalCandidates++
 						plan.indexedLocalSize += chunk.Size
@@ -3593,8 +3560,7 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 	if len(localChunkCandidates) > 0 {
 		knownLocalCandidates = localChunkCandidates[0]
 	}
-	cachedHashes, err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, final, previous, cacheDir, false, &knownLocalCandidates)
-	if err != nil {
+	if _, err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, final, previous, cacheDir, false, &knownLocalCandidates); err != nil {
 		log.Error("Final chunk preparation failed: snapshot=%s duration=%s error=%v", final.ID, time.Since(chunkPassStarted), err)
 		if preserveFinalSession(err) {
 			abortSession = false
@@ -3630,13 +3596,9 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 		log.Debug("Fetched on-demand final chunk: snapshot=%s hash=%s payload_bytes=%d server_encoded_body_bytes=%d encoded_body_measured=%t duration=%s", final.ID, hash, len(data), encodedBytes, encodedBytes >= 0, time.Since(started))
 		return data, nil
 	}
-	cachedSet := make(map[string]struct{}, len(cachedHashes))
-	for _, hash := range cachedHashes {
-		cachedSet[hash] = struct{}{}
-	}
 	_, applyErr := applyInPlace(ctx, inPlaceApplyOptions{
 		Manifest: final, Previous: previous, CacheDir: cacheDir, Fetch: fetch,
-		LocalCandidates: knownLocalCandidates, CachedHashes: cachedSet,
+		LocalCandidates: knownLocalCandidates,
 	})
 	if responses := onDemandResponsesReceived.Load(); responses > 0 {
 		log.Info("On-demand final chunk transfer summary: snapshot=%s responses_received=%d payload_bytes_received=%d server_encoded_body_bytes=%d measured_responses=%d/%d", final.ID, responses, onDemandPayloadBytesReceived.Load(), onDemandEncodedBodyBytes.Load(), onDemandEncodedBodyMeasurements.Load(), responses)

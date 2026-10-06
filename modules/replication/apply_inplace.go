@@ -48,9 +48,6 @@ type inPlaceApplyOptions struct {
 	// LocalCandidates are chunk locations the planning pass already found in the standby
 	// tree. When empty the applier builds the previous manifest index on first use.
 	LocalCandidates map[string][]chunkLocation
-	// CachedHashes are the chunks the transfer pass stored in the chunk cache. Occurrence
-	// counting for cache release is limited to them.
-	CachedHashes map[string]struct{}
 }
 
 // applyInPlace reconciles the standby data root to manifest by patching changed chunks in
@@ -141,9 +138,8 @@ func applyInPlace(ctx context.Context, opts inPlaceApplyOptions) (*inPlaceApplyS
 			if chunk.Zero {
 				continue
 			}
-			if _, cached := opts.CachedHashes[chunk.Hash]; !cached {
-				continue
-			}
+			// Count every use, including chunks fetched on demand, so a shared chunk is
+			// transferred once and released only after its last write.
 			remainingUses[chunk.Hash]++
 		}
 	}
