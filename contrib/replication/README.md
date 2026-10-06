@@ -148,6 +148,8 @@ The standby keeps one data tree and never builds a second copy:
 - The update is verified again: unchanged files through their recorded
   identities, new and changed content by hashing, and the whole tree whenever
   `FULL_SCAN_INTERVAL` is due.
+- The update is made durable with one filesystem flush of the data root before the
+  signed `ready` manifest is written, instead of one fsync per file and directory.
 - Only a verified run writes the signed `ready` manifest and `current.json`.
   There is no rollback: an interrupted update leaves the tree partially updated,
   and the next run repairs it against the then-current manifest. Do not promote

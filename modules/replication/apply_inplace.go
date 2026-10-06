@@ -144,7 +144,8 @@ func applyInPlace(ctx context.Context, opts inPlaceApplyOptions) (*inPlaceApplyS
 		}
 	}
 	source := &inPlaceChunkSource{
-		root: root, resolvedRoot: root, cacheDir: opts.CacheDir,
+		deferSync: canDeferTreeSync(),
+		root:      root, resolvedRoot: root, cacheDir: opts.CacheDir,
 		candidates: opts.LocalCandidates, previous: opts.Previous, fetch: opts.Fetch,
 		remaining: remainingUses,
 		memory:    newStageChunkMemoryCache(chunkMemoryCacheLimit), stats: stats,
@@ -207,16 +208,24 @@ func applyInPlace(ctx context.Context, opts inPlaceApplyOptions) (*inPlaceApplyS
 	if err := os.Chmod(root, os.FileMode(manifest.RootMode)); err != nil {
 		return nil, fmt.Errorf("restore standby data root permissions: %w", err)
 	}
-	for _, directory := range directories {
-		touchedDirs[directory.Path] = struct{}{}
-	}
-	for rel := range touchedDirs {
-		full := root
-		if rel != "." {
-			full = filepath.Join(root, filepath.FromSlash(rel))
+	if source.deferSync {
+		// One filesystem flush makes every patched chunk, rename and directory change
+		// durable, instead of one fsync per file and directory.
+		if err := syncFilesystem(root); err != nil {
+			return nil, fmt.Errorf("sync standby data tree: %w", err)
 		}
-		if err := syncDirectory(full); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("sync standby directory %q: %w", rel, err)
+	} else {
+		for _, directory := range directories {
+			touchedDirs[directory.Path] = struct{}{}
+		}
+		for rel := range touchedDirs {
+			full := root
+			if rel != "." {
+				full = filepath.Join(root, filepath.FromSlash(rel))
+			}
+			if err := syncDirectory(full); err != nil && !os.IsNotExist(err) {
+				return nil, fmt.Errorf("sync standby directory %q: %w", rel, err)
+			}
 		}
 	}
 	log.Info("Applied standby snapshot in place: snapshot=%s files_reused=%d files_created=%d files_patched=%d files_replaced=%d symlinks=%d chunks_reused=%d chunks_patched=%d chunks_from_cache=%d chunks_fetched=%d bytes_written=%d entries_deleted=%d directories_created=%d elapsed=%s", manifest.ID, stats.FilesReused, stats.FilesCreated, stats.FilesPatched, stats.FilesReplaced, stats.Symlinks, stats.ChunksReused, stats.ChunksPatched, stats.ChunksFromCache, stats.ChunksFetched, stats.BytesWritten, stats.EntriesDeleted, stats.Directories, time.Since(started))
@@ -322,7 +331,7 @@ func applyInPlaceFile(ctx context.Context, root string, source *inPlaceChunkSour
 	}
 	stats.ChunksReused += reused
 	if len(mismatches) == 0 {
-		if err := finalizeInPlaceFile(file, dst, entry); err != nil {
+		if err := finalizeInPlaceFile(file, dst, entry, !source.deferSync); err != nil {
 			return applyPathError("finalize file", entry.Path, err)
 		}
 		stats.FilesReused++
@@ -340,7 +349,7 @@ func applyInPlaceFile(ctx context.Context, root string, source *inPlaceChunkSour
 		stats.ChunksPatched++
 		stats.BytesWritten += int64(len(data))
 	}
-	if err := finalizeInPlaceFile(file, dst, entry); err != nil {
+	if err := finalizeInPlaceFile(file, dst, entry, !source.deferSync); err != nil {
 		return applyPathError("finalize file", entry.Path, err)
 	}
 	stats.FilesPatched++
@@ -398,7 +407,7 @@ func chunkMatchesHash(data []byte, expected string) bool {
 	return hex.EncodeToString(sum[:]) == expected
 }
 
-func finalizeInPlaceFile(file *os.File, dst string, entry *TreeEntry) error {
+func finalizeInPlaceFile(file *os.File, dst string, entry *TreeEntry, sync bool) error {
 	if err := file.Truncate(entry.Size); err != nil {
 		return err
 	}
@@ -408,6 +417,9 @@ func finalizeInPlaceFile(file *os.File, dst string, entry *TreeEntry) error {
 	mtime := time.Unix(0, entry.ModTimeNS)
 	if err := os.Chtimes(dst, mtime, mtime); err != nil {
 		return err
+	}
+	if !sync {
+		return nil
 	}
 	return file.Sync()
 }
@@ -553,6 +565,7 @@ func removeStaleApplyTemps(ctx context.Context, root string, directories []TreeE
 // inPlaceChunkSource resolves chunk bytes without trusting any unverified content: every
 // local candidate is checked against the requested hash before it is used.
 type inPlaceChunkSource struct {
+	deferSync          bool
 	root, resolvedRoot string
 	cacheDir           string
 	candidates         map[string][]chunkLocation
@@ -716,14 +729,19 @@ func (s *inPlaceChunkSource) rebuildFileThroughTemp(ctx context.Context, dst str
 	if err := os.Chtimes(tempPath, mtime, mtime); err != nil {
 		return err
 	}
-	if err := temp.Sync(); err != nil {
-		return err
+	if !s.deferSync {
+		if err := temp.Sync(); err != nil {
+			return err
+		}
 	}
 	if err := temp.Close(); err != nil {
 		return err
 	}
 	if err := os.Rename(tempPath, dst); err != nil {
 		return err
+	}
+	if s.deferSync {
+		return nil
 	}
 	return syncDirectory(filepath.Dir(dst))
 }
