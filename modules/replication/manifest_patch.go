@@ -144,6 +144,11 @@ func applyManifestPatch(base *SnapshotManifest, patch manifestPatch) (*SnapshotM
 	if next != len(patch.Changed) || len(rebuilt.Files) != patch.Count {
 		return nil, fmt.Errorf("manifest patch rebuilt %d of %d entries", len(rebuilt.Files), patch.Count)
 	}
+	if rebuilt.State != "ready" {
+		for i := range rebuilt.Files {
+			rebuilt.Files[i].LocalChangeID = ""
+		}
+	}
 	return &rebuilt, nil
 }
 

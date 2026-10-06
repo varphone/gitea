@@ -123,11 +123,22 @@ func TestManifestPatchReusesLocalIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rebuilt.Files[0].LocalChangeID != "standby:data/keep.bin" {
-		t.Fatalf("unchanged entry lost its local identity: %q", rebuilt.Files[0].LocalChangeID)
+	for i := range rebuilt.Files {
+		if rebuilt.Files[i].LocalChangeID != "" {
+			t.Fatalf("transient manifest kept local identity on %q", rebuilt.Files[i].Path)
+		}
 	}
-	if rebuilt.Files[1].LocalChangeID != "" {
-		t.Fatalf("changed entry kept a stale local identity: %q", rebuilt.Files[1].LocalChangeID)
+	readyPatch := patch
+	readyPatch.Manifest.State = "ready"
+	readyRebuilt, err := applyManifestPatch(&local, readyPatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readyRebuilt.Files[0].LocalChangeID != "standby:data/keep.bin" {
+		t.Fatalf("ready manifest lost its local identity: %q", readyRebuilt.Files[0].LocalChangeID)
+	}
+	if readyRebuilt.Files[1].LocalChangeID != "" {
+		t.Fatalf("changed entry kept a stale local identity: %q", readyRebuilt.Files[1].LocalChangeID)
 	}
 	if same, err := manifestsHaveSameContent(base, target); err != nil || same {
 		t.Fatalf("same content check: same=%v err=%v", same, err)
@@ -235,6 +246,12 @@ func TestManifestPatchResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	base.ID, base.State, base.CreatedAt = "20260101T000000.000000000Z", "ready", time.Unix(1, 0).UTC()
+	// A ready standby manifest carries local file identities, which a transient rebuild must drop.
+	for i := range base.Files {
+		if base.Files[i].Type == "file" {
+			base.Files[i].LocalChangeID = "standby:" + base.Files[i].Path
+		}
+	}
 	if err := os.Remove(filepath.Join(root, "data", "removed.bin")); err != nil {
 		t.Fatal(err)
 	}
@@ -281,6 +298,9 @@ func TestManifestPatchResponse(t *testing.T) {
 	rebuilt, err := applyManifestPatch(base, patch)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := validateIncrementalManifest(rebuilt); err != nil {
+		t.Fatalf("rebuilt preflight manifest is invalid: %v", err)
 	}
 	want, err := manifestDigestWithoutLocalChangeIDs(target)
 	if err != nil {
