@@ -526,6 +526,35 @@ func decodeBoundedJSONResponse(resp *http.Response, value any) error {
 	return json.Unmarshal(data, value)
 }
 
+func decodeManifestOrPatchResponse(resp *http.Response, baseManifest *SnapshotManifest, token string) (SnapshotManifest, error) {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type"))), manifestPatchContentType) {
+		if baseManifest == nil {
+			return SnapshotManifest{}, errors.New("source returned a manifest patch without a local base manifest")
+		}
+		patch, err := decodeBoundedManifestPatchResponse(resp)
+		if err != nil {
+			return SnapshotManifest{}, err
+		}
+		rebuilt, err := applyManifestPatch(baseManifest, patch)
+		if err != nil {
+			return SnapshotManifest{}, err
+		}
+		digest, err := manifestDigestWithoutLocalChangeIDs(rebuilt)
+		if err != nil {
+			return SnapshotManifest{}, err
+		}
+		if digest != rebuilt.SHA256 {
+			return SnapshotManifest{}, fmt.Errorf("rebuilt replication manifest digest %s does not match the signed digest", digest)
+		}
+		if !verifyIncrementalSignature(rebuilt, token) {
+			return SnapshotManifest{}, errors.New("rebuilt replication manifest signature is invalid")
+		}
+		log.Info("Rebuilt replication manifest from patch: snapshot=%s base=%s entries=%d changed=%d removed=%d", rebuilt.ID, patch.Base, len(rebuilt.Files), len(patch.Changed), len(patch.Removed))
+		return *rebuilt, nil
+	}
+	return decodeBoundedManifestResponse(resp)
+}
+
 func decodeBoundedManifestResponse(resp *http.Response) (SnapshotManifest, error) {
 	response, err := newBoundedEncodedResponse(resp, maxEncodedManifestSize)
 	if err != nil {
@@ -612,8 +641,8 @@ func (r *manifestReadErrorAsEOF) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func requestManifest(ctx context.Context, client *http.Client, base, token, endpoint string) (*SnapshotManifest, error) {
-	return requestManifestWithRequestID(ctx, client, base, token, endpoint, "", 0)
+func requestManifest(ctx context.Context, client *http.Client, base, token, endpoint string, baseManifest *SnapshotManifest) (*SnapshotManifest, error) {
+	return requestManifestWithRequestID(ctx, client, base, token, endpoint, "", 0, baseManifest)
 }
 
 func newReplicationRequestID() (string, error) {
@@ -624,11 +653,11 @@ func newReplicationRequestID() (string, error) {
 	return hex.EncodeToString(generated[:]), nil
 }
 
-func requestManifestWithRequestID(ctx context.Context, client *http.Client, base, token, endpoint, requestID string, sessionTimeout time.Duration) (*SnapshotManifest, error) {
-	return requestManifestWithRequestIDAndCallback(ctx, client, base, token, endpoint, requestID, sessionTimeout, nil)
+func requestManifestWithRequestID(ctx context.Context, client *http.Client, base, token, endpoint, requestID string, sessionTimeout time.Duration, baseManifest *SnapshotManifest) (*SnapshotManifest, error) {
+	return requestManifestWithRequestIDAndCallback(ctx, client, base, token, endpoint, requestID, sessionTimeout, nil, baseManifest)
 }
 
-func requestManifestWithRequestIDAndCallback(ctx context.Context, client *http.Client, base, token, endpoint, requestID string, sessionTimeout time.Duration, persistRequestID func(string) error) (*SnapshotManifest, error) {
+func requestManifestWithRequestIDAndCallback(ctx context.Context, client *http.Client, base, token, endpoint, requestID string, sessionTimeout time.Duration, persistRequestID func(string) error, baseManifest *SnapshotManifest) (*SnapshotManifest, error) {
 	request := syncJobRequest{}
 	if strings.Contains(endpoint, "preflight") {
 		request.Kind = "preflight"
@@ -693,7 +722,7 @@ func requestManifestWithRequestIDAndCallback(ctx context.Context, client *http.C
 				return nil, errors.New("sync job response contains an invalid snapshot ID")
 			}
 			log.Info("Replication sync job accepted: kind=%s request_id=%s snapshot=%s state=%s busy_waits=%d request_duration=%s", request.Kind, request.RequestID, job.ID, job.State, busyWaits, time.Since(requestStarted))
-			return pollManifestTask(ctx, client, base, token, job.ID, endpoint, sessionTimeout)
+			return pollManifestTask(ctx, client, base, token, job.ID, endpoint, sessionTimeout, baseManifest)
 		}
 		if resp.StatusCode != http.StatusOK {
 			statusErr := responseStatusError(endpoint, resp)
@@ -827,10 +856,14 @@ func requestSnapshotStatus(ctx context.Context, client *http.Client, base, token
 	return nil, errors.New("snapshot status retries exhausted")
 }
 
-func requestManifestByID(ctx context.Context, client *http.Client, base, token, id, expectedState string) (*SnapshotManifest, error) {
+func requestManifestByID(ctx context.Context, client *http.Client, base, token, id, expectedState string, baseManifest *SnapshotManifest) (*SnapshotManifest, error) {
 	operation := "fetch manifest " + id
+	manifestURL := base + "/api/v1/replication/sync-jobs/" + id + "/manifest"
+	if baseManifest != nil && baseManifest.ID != "" && baseManifest.ID != id {
+		manifestURL += "?base=" + baseManifest.ID
+	}
 	for attempt := 1; attempt <= requestRetryLimit; attempt++ {
-		resp, err := doRetryableRequestWithAcceptEncoding(ctx, client, http.MethodGet, base+"/api/v1/replication/sync-jobs/"+id+"/manifest", token, operation, "gzip")
+		resp, err := doRetryableRequestWithAcceptEncoding(ctx, client, http.MethodGet, manifestURL, token, operation, "gzip")
 		if err != nil {
 			return nil, err
 		}
@@ -839,9 +872,13 @@ func requestManifestByID(ctx context.Context, client *http.Client, base, token, 
 			_ = resp.Body.Close()
 			return nil, err
 		}
-		manifest, err := decodeBoundedManifestResponse(resp)
+		manifest, err := decodeManifestOrPatchResponse(resp, baseManifest, token)
 		if err != nil {
 			_ = resp.Body.Close()
+			if baseManifest != nil {
+				log.Debug("Falling back to the full replication manifest after a patch failure: snapshot=%s error=%v", id, err)
+				return requestManifestByID(ctx, client, base, token, id, expectedState, nil)
+			}
 			if attempt < requestRetryLimit && shouldRetryRequestError(err) {
 				if retryErr := waitForRetry(ctx, attempt, operation, err); retryErr != nil {
 					return nil, retryErr
@@ -920,7 +957,7 @@ func validateReplicaOAuth2ManifestConfig(manifest *SnapshotManifest) error {
 	return fmt.Errorf("replication snapshot %s does not contain configured OAuth2 JWT signing key path %q", manifest.ID, manifestPath)
 }
 
-func pollManifestTask(ctx context.Context, client *http.Client, base, token, id, endpoint string, sessionTimeout time.Duration) (*SnapshotManifest, error) {
+func pollManifestTask(ctx context.Context, client *http.Client, base, token, id, endpoint string, sessionTimeout time.Duration, baseManifest *SnapshotManifest) (*SnapshotManifest, error) {
 	expectedState := "transferring"
 	phase := "finalize"
 	if strings.Contains(endpoint, "preflight") {
@@ -977,7 +1014,7 @@ func pollManifestTask(ctx context.Context, client *http.Client, base, token, id,
 			if expectedState == "transferring" && stopProgressHeartbeats == nil {
 				stopProgressHeartbeats = startFinalSessionProgressHeartbeats(ctx, client, base, token, id, sessionTimeout)
 			}
-			manifest, err := requestManifestByID(ctx, client, base, token, id, expectedState)
+			manifest, err := requestManifestByID(ctx, client, base, token, id, expectedState, baseManifest)
 			if err != nil {
 				pollFailures, err = waitForPollRetry(ctx, phase+" manifest", id, pollStarted, pollFailures, err)
 				if err != nil {
@@ -3675,7 +3712,7 @@ func resumeFinalSync(ctx context.Context, cfg *config, base string, client *http
 			return true, err
 		}
 		if status.State == "ready" {
-			ready, err := requestManifestByID(ctx, client, base, cfg.ControlToken, final.ID, "ready")
+			ready, err := requestManifestByID(ctx, client, base, cfg.ControlToken, final.ID, "ready", nil)
 			if errors.Is(err, errRemoteManifestStateChanged) {
 				stateChangedErr = err
 				log.Info("Remote final sync state changed while loading its completed manifest: snapshot=%s attempt=%d/%d; rechecking status", final.ID, attempt, requestRetryLimit)
@@ -3712,7 +3749,7 @@ func resumeFinalSync(ctx context.Context, cfg *config, base string, client *http
 			return true, fmt.Errorf("remote final sync checkpoint has unexpected state %q: snapshot=%s", status.State, final.ID)
 		}
 		stopManifestHeartbeats := startFinalSessionProgressHeartbeats(ctx, client, base, cfg.ControlToken, final.ID, cfg.FinalSessionTimeout)
-		remote, err := requestManifestByID(ctx, client, base, cfg.ControlToken, final.ID, "transferring")
+		remote, err := requestManifestByID(ctx, client, base, cfg.ControlToken, final.ID, "transferring", nil)
 		stopManifestHeartbeats()
 		if errors.Is(err, errRemoteManifestStateChanged) {
 			stateChangedErr = err
@@ -3791,7 +3828,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 			recoveryPreflight = nil
 			log.Info("Requesting verified preflight recovery checkpoint %s", checkpoint.ID)
 			requestStarted := time.Now()
-			preflight, err = requestManifest(ctx, client, base, cfg.ControlToken, "preflight?resume="+checkpoint.ID)
+			preflight, err = requestManifest(ctx, client, base, cfg.ControlToken, "preflight?resume="+checkpoint.ID, previous)
 			if err != nil {
 				if !isUnavailablePreflightCheckpointError(err) {
 					log.Error("Preflight recovery checkpoint request failed: snapshot=%s duration=%s error=%v", checkpoint.ID, time.Since(requestStarted), err)
@@ -3828,7 +3865,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 				return persistStandbyPreflightRequestCheckpoint(cfg.SnapshotDir, preflightRequestCheckpoint, cfg.ControlToken)
 			}
 			requestStarted := time.Now()
-			preflight, err = requestManifestWithRequestIDAndCallback(ctx, client, base, cfg.ControlToken, "preflight", preflightRequestCheckpoint.RequestID, 0, persistRequestID)
+			preflight, err = requestManifestWithRequestIDAndCallback(ctx, client, base, cfg.ControlToken, "preflight", preflightRequestCheckpoint.RequestID, 0, persistRequestID, previous)
 			if err != nil {
 				log.Error("Preflight manifest request failed: duration=%s error=%v", time.Since(requestStarted), err)
 				return err
@@ -3847,7 +3884,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 					return persistStandbyPreflightRequestCheckpoint(cfg.SnapshotDir, preflightRequestCheckpoint, cfg.ControlToken)
 				}
 				requestStarted = time.Now()
-				preflight, err = requestManifestWithRequestIDAndCallback(ctx, client, base, cfg.ControlToken, "preflight", preflightRequestCheckpoint.RequestID, 0, persistRequestID)
+				preflight, err = requestManifestWithRequestIDAndCallback(ctx, client, base, cfg.ControlToken, "preflight", preflightRequestCheckpoint.RequestID, 0, persistRequestID, previous)
 				if err != nil {
 					log.Error("Fresh preflight manifest request failed: duration=%s error=%v", time.Since(requestStarted), err)
 					return err
@@ -3901,7 +3938,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 		} else {
 			log.Info("Resuming standby final request checkpoint: request_id=%s preflight=%s", requestCheckpoint.RequestID, preflight.ID)
 		}
-		final, err := requestManifestWithRequestID(ctx, client, base, cfg.ControlToken, "final?base="+preflight.ID, requestCheckpoint.RequestID, cfg.FinalSessionTimeout)
+		final, err := requestManifestWithRequestID(ctx, client, base, cfg.ControlToken, "final?base="+preflight.ID, requestCheckpoint.RequestID, cfg.FinalSessionTimeout, preflight)
 		if isEndedFinalizeRequestError(err) {
 			log.Warn("Previous final sync request already ended; creating a new request: request_id=%s preflight=%s", requestCheckpoint.RequestID, preflight.ID)
 			requestCheckpoint, err = newStandbyFinalizeRequestCheckpoint(preflight.ID, cfg.ControlToken)
@@ -3911,7 +3948,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 			if err := persistStandbyFinalizeRequestCheckpoint(cfg.SnapshotDir, requestCheckpoint, cfg.ControlToken); err != nil {
 				return fmt.Errorf("persist replacement standby final request checkpoint: %w", err)
 			}
-			final, err = requestManifestWithRequestID(ctx, client, base, cfg.ControlToken, "final?base="+preflight.ID, requestCheckpoint.RequestID, cfg.FinalSessionTimeout)
+			final, err = requestManifestWithRequestID(ctx, client, base, cfg.ControlToken, "final?base="+preflight.ID, requestCheckpoint.RequestID, cfg.FinalSessionTimeout, preflight)
 		}
 		if err != nil {
 			if finalizeAttempt == 1 && isUnavailablePreflightBaseError(err) {

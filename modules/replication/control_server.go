@@ -708,6 +708,18 @@ func (s *controlServer) syncTask(w http.ResponseWriter, r *http.Request) {
 			}
 			manifest = loaded
 		}
+		if baseID := strings.TrimSpace(r.URL.Query().Get("base")); baseID != "" && baseID != id && validSnapshotID(baseID) {
+			if base := s.loadManifestForPatch(baseID); base != nil {
+				patch, patchErr := buildManifestPatch(base, manifest)
+				if patchErr != nil {
+					log.Warn("Cannot build replication manifest patch: snapshot=%s base=%s error=%v", id, baseID, patchErr)
+				} else {
+					log.Info("Serving replication manifest patch: snapshot=%s base=%s changed=%d removed=%d entries=%d", id, baseID, len(patch.Changed), len(patch.Removed), patch.Count)
+					writeManifestPatchMaybeGzip(w, r, patch)
+					return
+				}
+			}
+		}
 		// Manifest responses stream a large document, so bound how many run at once.
 		slots, acquired := s.tryAcquireManifestSlot()
 		if !acquired {
@@ -725,6 +737,19 @@ func (s *controlServer) syncTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, job)
+}
+
+// loadManifestForPatch returns the retained manifest a standby offers as patch base.
+func (s *controlServer) loadManifestForPatch(id string) *SnapshotManifest {
+	if manifest := s.getTaskManifest(id); manifest != nil {
+		return manifest
+	}
+	manifest, err := loadTrustedManifestStates(manifestPath(s.cfg.SnapshotDir, id), s.cfg.ControlToken, "preflight", "transferring", "ready", "failed")
+	if err != nil {
+		log.Debug("Cannot load replication manifest patch base: snapshot=%s error=%v", id, err)
+		return nil
+	}
+	return manifest
 }
 
 func (s *controlServer) prune() {

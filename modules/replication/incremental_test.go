@@ -181,7 +181,7 @@ func TestRequestManifestWaitsForActiveReplication(t *testing.T) {
 		writeJSON(w, manifest)
 	}))
 	defer server.Close()
-	got, err := requestManifest(context.Background(), server.Client(), server.URL, token, "preflight")
+	got, err := requestManifest(context.Background(), server.Client(), server.URL, token, "preflight", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestRequestManifestGivesUpWhenPrimaryStaysBusy(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := requestManifestWithRequestID(ctx, server.Client(), server.URL, "token", "preflight", "", 5*time.Millisecond)
+	_, err := requestManifestWithRequestID(ctx, server.Client(), server.URL, "token", "preflight", "", 5*time.Millisecond, nil)
 	if err == nil || !strings.Contains(err.Error(), "stayed busy") {
 		t.Fatalf("busy wait returned %v", err)
 	}
@@ -316,7 +316,7 @@ func TestRequestManifestRetriesTransientGatewayErrors(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	got, err := requestManifest(ctx, server.Client(), server.URL, token, "preflight")
+	got, err := requestManifest(ctx, server.Client(), server.URL, token, "preflight", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
