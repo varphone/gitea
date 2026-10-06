@@ -2305,9 +2305,9 @@ func trimPlanToCacheLimit(plan *chunkFetchPlan) (deferredChunks int, deferredByt
 
 // fetchMissingChunks transfers the chunks the target manifest needs and returns the hashes
 // it stored in the chunk cache, so callers can bound cache bookkeeping to that set.
-func fetchMissingChunks(ctx context.Context, client *http.Client, base, token string, manifest, previous *SnapshotManifest, cacheDir string, preflight bool, localCandidates ...*map[string][]chunkLocation) ([]string, error) {
+func fetchMissingChunks(ctx context.Context, client *http.Client, base, token string, manifest, previous *SnapshotManifest, cacheDir string, preflight bool, localCandidates ...*map[string][]chunkLocation) error {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
 	var knownLocalCandidates map[string][]chunkLocation
 	if len(localCandidates) > 0 && localCandidates[0] != nil {
@@ -2317,7 +2317,7 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 	planningStarted := time.Now()
 	plan, err := planMissingChunks(ctx, manifest, previous, cacheDir, preflight, knownLocalCandidates)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	treeDir := setting.AppWorkPath
 	if treeDir == "" {
@@ -2329,14 +2329,14 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 	} else {
 		treeBytes, treeInodes, err = inPlaceApplyCapacity(manifest, previous)
 		if err != nil {
-			return nil, fmt.Errorf("estimate in-place apply capacity: %w", err)
+			return fmt.Errorf("estimate in-place apply capacity: %w", err)
 		}
 	}
 	if deferredChunks, deferredBytes := trimPlanToCacheLimit(&plan); deferredChunks > 0 {
 		log.Info("Deferring transferred chunks to on-demand retrieval during the in-place update: snapshot=%s deferred_chunks=%d deferred_payload_bytes=%d cache_limit=%d", manifest.ID, deferredChunks, deferredBytes, deferredChunkCacheLimit)
 	}
 	if err := checkRestoreCapacity(cacheDir, treeDir, treeBytes, plan.missingSize, treeInodes, int64(len(plan.hashes))); err != nil {
-		return nil, fmt.Errorf("preflight replication disk capacity: %w", err)
+		return fmt.Errorf("preflight replication disk capacity: %w", err)
 	}
 	if preflight && plan.localReindexAttempts > 0 {
 		log.Info("Preflight local chunk planning summary: snapshot=%s changed_file_reindex_attempts=%d manifest_bytes=%d local_candidate_chunks=%d local_candidate_payload_bytes=%d planning_duration=%s", manifest.ID, plan.localReindexAttempts, plan.localReindexBytes, plan.localNewCandidateChunks, plan.localNewCandidateSize, time.Since(planningStarted))
@@ -2347,15 +2347,12 @@ func fetchMissingChunks(ctx context.Context, client *http.Client, base, token st
 	if !preflight {
 		log.Info("Final chunk preparation plan: snapshot=%s download_chunks=%d expected_payload_bytes=%d reusable_candidates=%d reusable_candidate_payload_bytes=%d zero_chunks=%d zero_payload_bytes=%d previous_local_files_skipped=%d previous_local_files_unavailable=%d changed_file_reindex_attempts=%d changed_file_manifest_bytes=%d invalidated_local_candidates=%d indexed_local_candidates=%d indexed_local_payload_bytes=%d total_chunks=%d", manifest.ID, len(plan.hashes), plan.missingSize, plan.reusable, plan.reusableSize, plan.zeroChunks, plan.zeroSize, plan.previousLocalFilesSkipped, plan.previousLocalFilesUnavailable, plan.localReindexAttempts, plan.localReindexBytes, plan.invalidatedLocalCandidates, plan.indexedLocalCandidates, plan.indexedLocalSize, plan.total)
 		if err := fetchChunksConcurrently(ctx, client, base, token, manifest.ID, plan.hashes, plan.sizes, cacheDir, plan.total, plan.reusable, plan.reusableSize, plan.zeroChunks, plan.zeroSize, plan.missingSize); err != nil {
-			return nil, err
+			return err
 		}
 		log.Info("Final chunk pass prepared for snapshot %s: download_chunks=%d reusable_candidates=%d reusable_candidate_payload_bytes=%d zero_chunks=%d zero_payload_bytes=%d previous_local_files_skipped=%d previous_local_files_unavailable=%d changed_file_reindex_attempts=%d changed_file_manifest_bytes=%d invalidated_local_candidates=%d indexed_local_candidates=%d indexed_local_payload_bytes=%d total_chunks=%d expected_payload_bytes=%d duration=%s", manifest.ID, len(plan.hashes), plan.reusable, plan.reusableSize, plan.zeroChunks, plan.zeroSize, plan.previousLocalFilesSkipped, plan.previousLocalFilesUnavailable, plan.localReindexAttempts, plan.localReindexBytes, plan.invalidatedLocalCandidates, plan.indexedLocalCandidates, plan.indexedLocalSize, plan.total, plan.missingSize, time.Since(passStarted))
-		return plan.hashes, nil
+		return nil
 	}
-	if err := fetchPreflightChunksConcurrently(ctx, client, base, token, manifest.ID, plan.hashes, plan.sizes, cacheDir, plan.verifiedCacheShards, plan.total, plan.reusable, plan.reusableSize, plan.zeroChunks, plan.zeroSize, plan.missingSize, time.Since(passStarted)); err != nil {
-		return nil, err
-	}
-	return plan.hashes, nil
+	return fetchPreflightChunksConcurrently(ctx, client, base, token, manifest.ID, plan.hashes, plan.sizes, cacheDir, plan.verifiedCacheShards, plan.total, plan.reusable, plan.reusableSize, plan.zeroChunks, plan.zeroSize, plan.missingSize, time.Since(passStarted))
 }
 
 type chunkFetchRequest struct {
@@ -3560,7 +3557,7 @@ func completeFinalSync(ctx context.Context, cfg *config, base string, client *ht
 	if len(localChunkCandidates) > 0 {
 		knownLocalCandidates = localChunkCandidates[0]
 	}
-	if _, err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, final, previous, cacheDir, false, &knownLocalCandidates); err != nil {
+	if err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, final, previous, cacheDir, false, &knownLocalCandidates); err != nil {
 		log.Error("Final chunk preparation failed: snapshot=%s duration=%s error=%v", final.ID, time.Since(chunkPassStarted), err)
 		if preserveFinalSession(err) {
 			abortSession = false
@@ -3851,7 +3848,7 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 		if trustedBaseline && sameManifestContentTree(preflight, previous, setting.AppWorkPath) {
 			log.Info("Preflight manifest matches the trusted standby baseline outside regenerable data; defer chunk transfer until the final manifest: snapshot=%s files=%d bytes=%d", preflight.ID, preflight.FileCount, preflight.Size)
 		} else {
-			if _, err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, preflight, previous, cacheDir, true, &localChunkCandidates); err != nil {
+			if err := fetchMissingChunks(ctx, client, base, cfg.ControlToken, preflight, previous, cacheDir, true, &localChunkCandidates); err != nil {
 				return err
 			}
 		}

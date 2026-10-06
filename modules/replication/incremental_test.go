@@ -354,7 +354,7 @@ func TestPreflightCapacityReservesOnlyRetainedChunks(t *testing.T) {
 	statFSAvailable = func(string) (int64, int64, uint64, error) {
 		return restoreDiskSafetyMargin, 1000, 1, nil
 	}
-	if _, err := fetchMissingChunks(context.Background(), server.Client(), server.URL, "token", manifest, nil, t.TempDir(), true); err != nil {
+	if err := fetchMissingChunks(context.Background(), server.Client(), server.URL, "token", manifest, nil, t.TempDir(), true); err != nil {
 		t.Fatalf("deferred chunks were reserved in the cache footprint: %v", err)
 	}
 }
@@ -378,7 +378,7 @@ func TestFetchMissingChunksDefersChangedPreflightChunks(t *testing.T) {
 	defer server.Close()
 
 	cacheDir := t.TempDir()
-	if _, err := fetchMissingChunks(context.Background(), server.Client(), server.URL, "token", manifest, nil, cacheDir, true); err != nil {
+	if err := fetchMissingChunks(context.Background(), server.Client(), server.URL, "token", manifest, nil, cacheDir, true); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(cacheDir)
