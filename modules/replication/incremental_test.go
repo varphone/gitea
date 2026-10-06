@@ -1285,3 +1285,42 @@ func TestIncrementalDeltaTransferMatrix(t *testing.T) {
 		t.Fatalf("unchanged tree transferred %d chunks / %d bytes", unchanged.planChunks, unchanged.planBytes)
 	}
 }
+
+func TestUnchangedPreflightSkipsFinalSync(t *testing.T) {
+	oldRoot, oldVersion := setting.AppWorkPath, setting.AppVer
+	defer func() { setting.AppWorkPath, setting.AppVer = oldRoot, oldVersion }()
+	root := t.TempDir()
+	setting.AppWorkPath, setting.AppVer = root, "test"
+	token := "01234567890123456789012345678901"
+	requireWriteFile(t, filepath.Join(root, "data", "file.bin"), "content")
+	requireWriteFile(t, filepath.Join(root, "data", "other.bin"), "more")
+
+	baseline := scanTreeForApplyTest(t, root)
+	baseline.ID, baseline.State = "20260101T000000.000000000Z", "ready"
+	baseline.InstanceFingerprint = instanceFingerprint(token)
+	baseline.GeneralTokenSecretFingerprint = generalTokenSecretFingerprint(token)
+	preflight := scanTreeForApplyTest(t, root)
+	preflight.ID, preflight.State, preflight.CreatedAt = "20260101T010000.000000000Z", "preflight", time.Unix(2, 0).UTC()
+	preflight.InstanceFingerprint = instanceFingerprint(token)
+	preflight.GeneralTokenSecretFingerprint = generalTokenSecretFingerprint(token)
+
+	if !sameManifestContentTree(preflight, baseline, root) {
+		t.Fatal("identical snapshots must compare equal")
+	}
+	if err := verifyRestoredStandbyTree(context.Background(), root, preflight, baseline); err != nil {
+		t.Fatalf("standby data must verify against the unchanged snapshot: %v", err)
+	}
+	if err := signRestoredStandbyManifest(context.Background(), preflight, token); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateIncrementalManifest(preflight); err != nil {
+		t.Fatalf("adopted snapshot is invalid: %v", err)
+	}
+
+	requireWriteFile(t, filepath.Join(root, "data", "file.bin"), "changed")
+	changed := scanTreeForApplyTest(t, root)
+	changed.State = "preflight"
+	if sameManifestContentTree(changed, baseline, root) {
+		t.Fatal("changed snapshots must not compare equal")
+	}
+}

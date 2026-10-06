@@ -3899,6 +3899,17 @@ func restoreIncremental(ctx context.Context, cfg *config, base string, client *h
 		}
 		pruneManifestFiles(cfg.SnapshotDir, cfg.SnapshotRetention, cfg.ControlToken)
 		log.Info("Received preflight manifest %s with %d entries and %s of content", preflight.ID, preflight.FileCount, strconv.FormatInt(preflight.Size, 10))
+		if trustedBaseline && sameManifestContentTree(preflight, previous, setting.AppWorkPath) {
+			if verifyErr := verifyRestoredStandbyTree(ctx, filepath.Clean(setting.AppWorkPath), preflight, previous); verifyErr == nil {
+				if err := persistReadyStandbySync(ctx, cfg, preflight, cacheDir); err != nil {
+					return fmt.Errorf("persist unchanged preflight snapshot: %w", err)
+				}
+				log.Info("Preflight snapshot matches the standby data; skipped the final sync and the primary fence: snapshot=%s entries=%d", preflight.ID, preflight.FileCount)
+				return nil
+			} else {
+				log.Warn("Standby data no longer matches the unchanged preflight snapshot; running the final sync: snapshot=%s error=%v", preflight.ID, verifyErr)
+			}
+		}
 		// The final scan can differ; retain baseline chunks until its manifest arrives.
 		if err := pruneChunkCache(ctx, cacheDir, preflight.ID, preflight, previous); err != nil {
 			return fmt.Errorf("prune stale replication chunk cache: %w", err)
