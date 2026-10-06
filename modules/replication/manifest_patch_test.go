@@ -4,12 +4,18 @@
 package replication
 
 import (
+	"context"
 	"encoding/hex"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"gitea.dev/modules/setting"
 )
 
 func patchTestChunk(seed byte) ChunkDescriptor {
@@ -36,7 +42,7 @@ func patchTestFile(path string, modTime int64, chunks ...ChunkDescriptor) TreeEn
 func patchTestManifest(id, state string, files ...TreeEntry) *SnapshotManifest {
 	return &SnapshotManifest{
 		Snapshot:      Snapshot{ID: id, State: state, CreatedAt: time.Unix(1700000000, 0).UTC(), Size: 1, RootMode: 0o755},
-		FormatVersion: incrementalFormatVersion, GiteaVersion: "test", AppWorkPath: "/tmp/gitea",
+		FormatVersion: incrementalFormatVersion, GiteaVersion: setting.AppVer, AppWorkPath: setting.AppWorkPath,
 		FileCount: len(files), Files: files,
 	}
 }
@@ -206,5 +212,96 @@ func TestDecodeManifestPatchResponse(t *testing.T) {
 	}
 	if _, err := decodeManifestOrPatchResponse(response, base, "token"); err == nil {
 		t.Fatal("tampered patch was accepted")
+	}
+}
+
+func TestManifestPatchResponse(t *testing.T) {
+	oldRoot, oldVersion := setting.AppWorkPath, setting.AppVer
+	defer func() { setting.AppWorkPath, setting.AppVer = oldRoot, oldVersion }()
+	root := t.TempDir()
+	setting.AppWorkPath, setting.AppVer = root, "test"
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "data", "keep.bin"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "data", "removed.bin"), []byte("removed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	token := "01234567890123456789012345678901"
+	base, err := scanIncrementalTree(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.ID, base.State, base.CreatedAt = "20260101T000000.000000000Z", "ready", time.Unix(1, 0).UTC()
+	if err := os.Remove(filepath.Join(root, "data", "removed.bin")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "data", "added.bin"), []byte("added"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target, err := scanIncrementalTree(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.ID, target.State, target.CreatedAt = "20260101T010000.000000000Z", "preflight", time.Unix(2, 0).UTC()
+	snapshotDir := t.TempDir()
+	for _, manifest := range []*SnapshotManifest{base, target} {
+		manifest.InstanceFingerprint = instanceFingerprint(token)
+		signTestManifest(t, manifest, token)
+		if err := writeManifest(snapshotDir, manifest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := &controlServer{
+		cfg:  &config{Mode: modePrimary, ControlToken: token, SnapshotDir: snapshotDir},
+		jobs: map[string]*Snapshot{target.ID: {ID: target.ID, State: "preflight"}},
+	}
+
+	response := httptest.NewRecorder()
+	server.syncTask(response, httptest.NewRequest(http.MethodGet, syncJobsPath+"/"+target.ID+"/manifest?base="+base.ID, nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("patch status=%d body=%s", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, manifestPatchContentType) {
+		t.Fatalf("content type=%q want %q", contentType, manifestPatchContentType)
+	}
+	var patch manifestPatch
+	if err := newManifestDecoder(strings.NewReader(response.Body.String())).Decode(&patch); err != nil {
+		t.Fatalf("decode patch: %v", err)
+	}
+	changedPaths := make(map[string]bool, len(patch.Changed))
+	for _, item := range patch.Changed {
+		changedPaths[item.Entry.Path] = true
+	}
+	if !changedPaths["data/added.bin"] || len(patch.Removed) != 1 || patch.Removed[0] != "data/removed.bin" {
+		t.Fatalf("patch changed=%v removed=%v", changedPaths, patch.Removed)
+	}
+	rebuilt, err := applyManifestPatch(base, patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := manifestDigestWithoutLocalChangeIDs(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := manifestDigestWithoutLocalChangeIDs(rebuilt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("rebuilt digest %s want %s", got, want)
+	}
+
+	// Unknown base falls back to the full manifest.
+	response = httptest.NewRecorder()
+	unknown := "20250101T000000.000000000Z"
+	server.syncTask(response, httptest.NewRequest(http.MethodGet, syncJobsPath+"/"+target.ID+"/manifest?base="+unknown, nil))
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("fallback content type=%q", contentType)
+	}
+	if !strings.Contains(response.Body.String(), target.ID) {
+		t.Fatal("fallback body is not the full manifest")
 	}
 }
