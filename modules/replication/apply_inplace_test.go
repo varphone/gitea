@@ -442,3 +442,37 @@ func TestInPlaceApplyReleasesSharedCachedChunkAfterLastUse(t *testing.T) {
 		t.Fatalf("cached chunk remains after its last use: %v", err)
 	}
 }
+
+func TestInPlaceApplyPatchesReadOnlyFile(t *testing.T) {
+	source := t.TempDir()
+	sourcePath := filepath.Join(source, "data", "object")
+	requireWriteFile(t, sourcePath, "AAAAAAAA")
+	if err := os.Chmod(sourcePath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	previous := scanTreeForApplyTest(t, source)
+
+	target, cacheDir := t.TempDir(), filepath.Join(t.TempDir(), "chunks")
+	applyManifestForTest(t, target, cacheDir, previous, nil, chunkFetchFromTree(t, source, previous))
+	targetPath := filepath.Join(target, "data", "object")
+	requireFileContent(t, targetPath, "AAAAAAAA")
+
+	if err := os.Chmod(sourcePath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requireWriteFile(t, sourcePath, "BBBBBBBB")
+	if err := os.Chmod(sourcePath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	manifest := scanTreeForApplyTest(t, source)
+
+	applyManifestForTest(t, target, cacheDir, manifest, previous, chunkFetchFromTree(t, source, manifest))
+	requireFileContent(t, targetPath, "BBBBBBBB")
+	info, err := os.Lstat(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o444 {
+		t.Fatalf("patched read-only file mode=%o want=444", got)
+	}
+}

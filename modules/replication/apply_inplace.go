@@ -288,6 +288,12 @@ func applyInPlaceFile(ctx context.Context, root string, source *inPlaceChunkSour
 		stats.FilesCreated++
 		return nil
 	}
+	if info.Mode().Perm()&0o200 == 0 {
+		// Git objects are read-only; allow the patch and let finalizeInPlaceFile restore the manifest mode.
+		if err := os.Chmod(dst, info.Mode().Perm()|0o200); err != nil {
+			return applyPathError("make file writable", entry.Path, err)
+		}
+	}
 	file, err := os.OpenFile(dst, os.O_RDWR, 0)
 	if err != nil {
 		return applyPathError("open file", entry.Path, err)
