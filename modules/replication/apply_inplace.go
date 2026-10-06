@@ -246,6 +246,27 @@ func applyInPlaceSymlink(ctx context.Context, root string, entry *TreeEntry, pre
 	return nil
 }
 
+// shiftedManifestFile reports whether entry shares a chunk hash with previous at a
+// different offset. Patching such a file in place would overwrite bytes it still has
+// to read, so it is rebuilt through a temporary file instead.
+func shiftedManifestFile(entry, previous TreeEntry, hasPrevious bool) bool {
+	if !hasPrevious || previous.Type != "file" || len(previous.Chunks) == 0 {
+		return false
+	}
+	offsets := make(map[string][]int64, len(previous.Chunks))
+	for _, chunk := range previous.Chunks {
+		offsets[chunk.Hash] = append(offsets[chunk.Hash], chunk.Offset)
+	}
+	for _, chunk := range entry.Chunks {
+		for _, offset := range offsets[chunk.Hash] {
+			if offset != chunk.Offset {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // applyInPlaceFile makes dst match entry, patching only the chunks that differ. Files that
 // cannot be patched safely (new files, hard-linked files) are rebuilt through a temporary
 // file in the same directory and renamed into place.
@@ -270,7 +291,7 @@ func applyInPlaceFile(ctx context.Context, root string, source *inPlaceChunkSour
 		stats.FilesReused++
 		return nil
 	}
-	if exists && fileHasMultipleLinks(info) {
+	if exists && (fileHasMultipleLinks(info) || shiftedManifestFile(*entry, previous, hasPrevious)) {
 		if err := source.rebuildFileThroughTemp(ctx, dst, entry); err != nil {
 			return applyPathError("rebuild file", entry.Path, err)
 		}

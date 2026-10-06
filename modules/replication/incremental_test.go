@@ -1136,13 +1136,67 @@ func TestFinalPlanDownloadsChunksOnlyAvailableInRewrittenFiles(t *testing.T) {
 	}
 }
 
-func TestIncrementalDeltaTransfersOnlyChangedChunks(t *testing.T) {
-	random := rand.New(rand.NewSource(23))
-	content := make([]byte, 8*1024*1024)
-	if _, err := random.Read(content); err != nil {
+type deltaTransfer struct {
+	planChunks   int
+	planBytes    int64
+	fetched      int
+	fetchedBytes int64
+	totalChunks  int
+}
+
+// syncTreeOnce scans source, plans the transfer against previous while standby holds the
+// current replica state, applies the manifest to standby and reports the transferred data.
+func syncTreeOnce(t *testing.T, source, standby, cacheDir string, previous **SnapshotManifest) deltaTransfer {
+	t.Helper()
+	manifest := scanTreeForApplyTest(t, source)
+
+	oldWorkPath := setting.AppWorkPath
+	setting.AppWorkPath = standby
+	plan, err := planMissingChunks(context.Background(), manifest, *previous, cacheDir, false, nil)
+	setting.AppWorkPath = oldWorkPath
+	if err != nil {
 		t.Fatal(err)
 	}
 
+	baseFetch := chunkFetchFromTree(t, source, manifest)
+	fetched, fetchedBytes := 0, int64(0)
+	applyManifestOptionsForTest(t, standby, cacheDir, inPlaceApplyOptions{
+		Manifest: manifest, Previous: *previous, CacheDir: cacheDir,
+		LocalCandidates: plan.localCandidates,
+		Fetch: func(ctx context.Context, hash string) ([]byte, error) {
+			data, err := baseFetch(ctx, hash)
+			if err != nil {
+				return nil, err
+			}
+			fetched++
+			fetchedBytes += int64(len(data))
+			return data, nil
+		},
+	})
+	if fetched != len(plan.hashes) {
+		t.Fatalf("fetched %d chunks but planned %d", fetched, len(plan.hashes))
+	}
+	if fetchedBytes != plan.missingSize {
+		t.Fatalf("fetched %d bytes but planned %d", fetchedBytes, plan.missingSize)
+	}
+	if err := recordLocalChangeIDs(context.Background(), standby, manifest); err != nil {
+		t.Fatal(err)
+	}
+	*previous = manifest
+	return deltaTransfer{
+		planChunks: len(plan.hashes), planBytes: plan.missingSize,
+		fetched: fetched, fetchedBytes: fetchedBytes, totalChunks: plan.total,
+	}
+}
+
+func TestIncrementalDeltaTransferMatrix(t *testing.T) {
+	const fileSize = 16 * 1024 * 1024
+	const megabyte = 1024 * 1024
+	random := rand.New(rand.NewSource(31))
+	content := make([]byte, fileSize)
+	if _, err := random.Read(content); err != nil {
+		t.Fatal(err)
+	}
 	source, standby := t.TempDir(), t.TempDir()
 	sourcePath := filepath.Join(source, "data", "big.bin")
 	standbyPath := filepath.Join(standby, "data", "big.bin")
@@ -1151,80 +1205,83 @@ func TestIncrementalDeltaTransfersOnlyChangedChunks(t *testing.T) {
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-
 	var previous *SnapshotManifest
-	sync := func(label string) (int, int64) {
-		t.Helper()
-		manifest := scanTreeForApplyTest(t, source)
 
-		oldWorkPath := setting.AppWorkPath
-		setting.AppWorkPath = standby
-		plan, err := planMissingChunks(context.Background(), manifest, previous, cacheDir, false, nil)
-		setting.AppWorkPath = oldWorkPath
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		baseFetch := chunkFetchFromTree(t, source, manifest)
-		fetched, fetchedBytes := 0, int64(0)
-		applyManifestOptionsForTest(t, standby, cacheDir, inPlaceApplyOptions{
-			Manifest: manifest, Previous: previous, CacheDir: cacheDir,
-			LocalCandidates: plan.localCandidates,
-			Fetch: func(ctx context.Context, hash string) ([]byte, error) {
-				data, err := baseFetch(ctx, hash)
-				if err != nil {
-					return nil, err
-				}
-				fetched++
-				fetchedBytes += int64(len(data))
-				return data, nil
-			},
-		})
-		if fetched != len(plan.hashes) {
-			t.Fatalf("%s: fetched %d chunks but planned %d", label, fetched, len(plan.hashes))
-		}
-		if fetchedBytes != plan.missingSize {
-			t.Fatalf("%s: fetched %d bytes but planned %d", label, fetchedBytes, plan.missingSize)
-		}
-		if err := recordLocalChangeIDs(context.Background(), standby, manifest); err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("%-18s chunks_transferred=%-3d payload_bytes=%-9d total_chunks=%d reusable=%d unavailable=%d skipped=%d reindex=%d file_bytes=%d", label, len(plan.hashes), plan.missingSize, plan.total, plan.reusable, plan.previousLocalFilesUnavailable, plan.previousLocalFilesSkipped, plan.localReindexAttempts, len(content))
-		previous = manifest
-		return len(plan.hashes), plan.missingSize
-	}
-
-	if chunks, payload := sync("initial full sync"); chunks == 0 || payload < int64(len(content))/2 {
-		t.Fatalf("initial sync transferred too little: chunks=%d bytes=%d", chunks, payload)
+	initial := syncTreeOnce(t, source, standby, cacheDir, &previous)
+	t.Logf("%-24s chunks=%-3d bytes=%-9d total=%d", "initial full sync", initial.planChunks, initial.planBytes, initial.totalChunks)
+	if initial.planChunks == 0 || initial.planBytes < fileSize {
+		t.Fatalf("initial sync transferred too little: %+v", initial)
 	}
 	requireFileContent(t, standbyPath, string(content))
 
-	edit := func(offset, size int) {
-		for i := range size {
-			content[offset+i] ^= 0x5a
-		}
-		requireWriteFile(t, sourcePath, string(content))
+	type edit struct {
+		label string
+		apply func([]byte) []byte
 	}
-	for _, test := range []struct {
-		label  string
-		offset int
-	}{
-		{label: "64B at start", offset: 0},
-		{label: "64B in middle", offset: len(content) / 2},
-		{label: "64B at end", offset: len(content) - 64},
-	} {
-		edit(test.offset, 64)
-		chunks, payload := sync(test.label)
-		if chunks > 2 {
-			t.Fatalf("%s: %d chunks transferred, want at most 2", test.label, chunks)
+	modify := func(offset, size int) func([]byte) []byte {
+		return func(c []byte) []byte {
+			for i := range size {
+				c[offset+i] ^= 0x5a
+			}
+			return c
 		}
-		if payload > 2*chunkMaxSize {
-			t.Fatalf("%s: %d bytes transferred, want at most %d", test.label, payload, 2*chunkMaxSize)
+	}
+	insert := func(offset, size int) func([]byte) []byte {
+		return func(c []byte) []byte {
+			inserted := make([]byte, size)
+			for i := range inserted {
+				inserted[i] = byte(0xa5 ^ i)
+			}
+			out := make([]byte, 0, len(c)+size)
+			out = append(out, c[:offset]...)
+			out = append(out, inserted...)
+			return append(out, c[offset:]...)
+		}
+	}
+	remove := func(offset, size int) func([]byte) []byte {
+		return func(c []byte) []byte {
+			out := make([]byte, 0, len(c)-size)
+			out = append(out, c[:offset]...)
+			return append(out, c[offset+size:]...)
+		}
+	}
+
+	edits := []edit{
+		{label: "modify 1B at start", apply: modify(0, 1)},
+		{label: "modify 4KiB at 25%", apply: modify(fileSize/4, 4*1024)},
+		{label: "modify 1MiB at 50%", apply: modify(fileSize/2, megabyte)},
+		{label: "insert 1B at start", apply: insert(0, 1)},
+		{label: "insert 4KiB at 75%", apply: insert(len(content)*3/4, 4*1024)},
+		{label: "insert 1MiB at 50%", apply: insert(len(content)/2, megabyte)},
+		{label: "append 1MiB at end", apply: insert(len(content), megabyte)},
+		{label: "delete 1B at start", apply: remove(0, 1)},
+		{label: "delete 4KiB at 25%", apply: remove(len(content)/4, 4*1024)},
+		{label: "delete 1MiB at 50%", apply: remove(len(content)/2, megabyte)},
+		{label: "truncate 1MiB at end", apply: remove(len(content)-megabyte, megabyte)},
+	}
+	for _, e := range edits {
+		content = e.apply(content)
+		requireWriteFile(t, sourcePath, string(content))
+		transfer := syncTreeOnce(t, source, standby, cacheDir, &previous)
+		t.Logf("%-24s chunks=%-3d bytes=%-9d total=%-3d file_bytes=%d", e.label, transfer.planChunks, transfer.planBytes, transfer.totalChunks, len(content))
+		if transfer.planChunks >= transfer.totalChunks {
+			t.Fatalf("%s: transferred every chunk (%d of %d)", e.label, transfer.planChunks, transfer.totalChunks)
+		}
+		if transfer.planBytes >= int64(len(content)) {
+			t.Fatalf("%s: transferred %d of %d file bytes", e.label, transfer.planBytes, len(content))
+		}
+		if transfer.planBytes > megabyte+4*chunkMaxSize {
+			t.Fatalf("%s: transferred %d bytes for a 1 MiB change", e.label, transfer.planBytes)
+		}
+		if strings.Contains(e.label, "1B") && transfer.planChunks > 2 {
+			t.Fatalf("%s: %d chunks transferred for one byte", e.label, transfer.planChunks)
 		}
 		requireFileContent(t, standbyPath, string(content))
 	}
 
-	if chunks, payload := sync("no change"); chunks != 0 || payload != 0 {
-		t.Fatalf("unchanged tree transferred %d chunks / %d bytes", chunks, payload)
+	unchanged := syncTreeOnce(t, source, standby, cacheDir, &previous)
+	t.Logf("%-24s chunks=%-3d bytes=%-9d total=%d", "no change", unchanged.planChunks, unchanged.planBytes, unchanged.totalChunks)
+	if unchanged.planChunks != 0 || unchanged.planBytes != 0 {
+		t.Fatalf("unchanged tree transferred %d chunks / %d bytes", unchanged.planChunks, unchanged.planBytes)
 	}
 }

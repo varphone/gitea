@@ -1872,7 +1872,29 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 		}
 		newChunks[entry.Path] = byOffset
 	}
-	candidateSurvives := func(path string, offset, size int64, hash string) bool {
+	// Files whose content shifts (an insertion or deletion before later chunks) are
+	// rebuilt through a temporary file, which reads the old bytes before replacing them.
+	shiftedPaths := make(map[string]struct{})
+	if previous != nil {
+		prior := make(map[string]TreeEntry, len(previous.Files))
+		for _, entry := range previous.Files {
+			prior[entry.Path] = entry
+		}
+		for _, entry := range manifest.Files {
+			if entry.Type != "file" {
+				continue
+			}
+			if old, ok := prior[entry.Path]; ok && shiftedManifestFile(entry, old, true) {
+				shiftedPaths[entry.Path] = struct{}{}
+			}
+		}
+	}
+	candidateSurvives := func(path string, offset, size int64, hash, consumer string) bool {
+		if path == consumer {
+			if _, rebuilt := shiftedPaths[path]; rebuilt {
+				return true
+			}
+		}
 		byOffset, ok := newChunks[path]
 		if !ok {
 			return false
@@ -1880,8 +1902,8 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 		chunk, ok := byOffset[offset]
 		return ok && chunk.Hash == hash && chunk.Size == size
 	}
-	safeCandidate := func(location chunkLocation, size int64, hash string) bool {
-		if !candidateSurvives(location.Path, location.Offset, location.Size, hash) {
+	safeCandidate := func(location chunkLocation, size int64, hash, consumer string) bool {
+		if !candidateSurvives(location.Path, location.Offset, location.Size, hash, consumer) {
 			return false
 		}
 		return localCandidateAvailable(location, size)
@@ -1989,7 +2011,7 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 							}
 						}
 						if target, ok := states[chunk.Hash]; ok && target.state != chunkPlanZero && target.size == chunk.Size {
-							if !candidateSurvives(entry.Path, chunk.Offset, chunk.Size, chunk.Hash) {
+							if !candidateSurvives(entry.Path, chunk.Offset, chunk.Size, chunk.Hash, entry.Path) {
 								continue
 							}
 							if !localChunksMatchManifest || localChangeIDChanged {
@@ -2124,7 +2146,7 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 						locations := plan.localCandidates[chunk.Hash]
 						available := locations[:0]
 						for _, location := range locations {
-							if safeCandidate(location, chunk.Size, chunk.Hash) {
+							if safeCandidate(location, chunk.Size, chunk.Hash, entry.Path) {
 								available = append(available, location)
 							} else {
 								plan.invalidatedLocalCandidates++
@@ -2135,7 +2157,7 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 						} else {
 							plan.localCandidates[chunk.Hash] = available
 						}
-						if !candidateSurvives(entry.Path, chunk.Offset, chunk.Size, chunk.Hash) {
+						if !candidateSurvives(entry.Path, chunk.Offset, chunk.Size, chunk.Hash, entry.Path) {
 							continue
 						}
 						addLocalChunkCandidate(plan.localCandidates, chunk.Hash, chunkLocation{
@@ -2186,7 +2208,7 @@ func planMissingChunks(ctx context.Context, manifest, previous *SnapshotManifest
 			}
 			if !preflight && state == chunkPlanNeeded {
 				for _, location := range localCandidates[chunk.Hash] {
-					if safeCandidate(location, chunk.Size, chunk.Hash) {
+					if safeCandidate(location, chunk.Size, chunk.Hash, entry.Path) {
 						state = chunkPlanReusable
 						plan.indexedLocalCandidates++
 						plan.indexedLocalSize += chunk.Size
