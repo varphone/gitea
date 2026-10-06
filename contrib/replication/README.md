@@ -142,7 +142,9 @@ The standby keeps one data tree and never builds a second copy:
   transferred deltas touch the disk.
 - New files, hard-linked files and type conflicts are rebuilt through a
   temporary file in the same directory and renamed into place.
-- Obsolete entries are removed only after the rest of the tree matches.
+- Every entry the target manifest does not list is removed, including files an
+  interrupted earlier update left behind, so keep no node-local data below
+  `APP_WORK_PATH`.
 - The update is verified again: unchanged files through their recorded
   identities, new and changed content by hashing, and the whole tree whenever
   `FULL_SCAN_INTERVAL` is due.
@@ -308,9 +310,9 @@ source IP, TLS, and the independent bearer token.
 Earlier builds kept a retained shadow tree at `SNAPSHOT_DIR/.install-stage`,
 recorded `.install-stage.checkpoint` and `.stage-current.json`, activated a
 snapshot by exchanging directories through a root-owned helper, and could leave
-full-data `*.tar.gz` archives behind. Current builds neither read nor clean up
-that state, so remove it once after upgrading to release the second full copy of
-the data:
+full-data `*.tar.gz` archives and `SNAPSHOT_DIR/recovery-backups` rollback copies
+behind. Current builds neither read nor clean up that state, so remove it once
+after upgrading to release the second full copy of the data:
 
 ```sh
 systemctl disable --now gitea-replication-switch.service
@@ -322,6 +324,7 @@ rm -f /var/lib/gitea-replication/snapshots/*.tar.gz \
   /var/lib/gitea-replication/snapshots/.stage-current.json
 rm -f /var/lib/gitea-replication/snapshots/.replication-exchange-probe-* \
   /var/lib/gitea-replication/snapshots/..install-stage.checkpoint.tmp-*
+rm -rf /var/lib/gitea-replication/recovery-backups
 systemctl daemon-reload
 ```
 
